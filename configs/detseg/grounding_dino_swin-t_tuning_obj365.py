@@ -221,29 +221,45 @@ optim_wrapper = dict(
     paramwise_cfg=dict(
         custom_keys={
             'absolute_pos_embed': dict(decay_mult=0.),
-            'backbone': dict(lr_mult=0.1),
-            'language_model': dict(lr_mult=0.1),
+            'backbone': dict(lr_mult=0.0),
+            'language_model': dict(lr_mult=0.0),
         }))
 
 # learning policy
-max_epochs = 30
+max_epochs = 1
+# param_scheduler = [
+#     dict(
+#         type='MultiStepLR',
+#         begin=0,
+#         end=max_epochs,
+#         by_epoch=True,
+#         milestones=[8, 11],
+#         gamma=0.1)
+# ]
+
+# train_cfg = dict(
+#     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
+
 param_scheduler = [
-    dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
     dict(
         type='MultiStepLR',
         begin=0,
-        end=max_epochs,
-        by_epoch=True,
-        milestones=[19, 26],
+        end=38038,
+        by_epoch=False,
+        milestones=[30000, 36000],
         gamma=0.1)
 ]
 
-train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_interval=2000)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
 # base_batch_size = (16 GPUs) x (2 samples per GPU)
-auto_scale_lr = dict(base_batch_size=64)
+# auto_scale_lr = dict(base_batch_size=64)
+auto_scale_lr = dict(base_batch_size=16)
 
-default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'))
+default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
+                     checkpoint=dict(type='CheckpointHook', interval=2000, by_epoch=False),)
+
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'  # noqa
+load_from = 'ckpts/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'

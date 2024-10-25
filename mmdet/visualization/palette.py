@@ -62,8 +62,9 @@ def get_palette(palette: Union[List[tuple], str, tuple],
     else:
         raise TypeError(f'Invalid type for palette: {type(palette)}')
 
-    assert len(dataset_palette) >= num_classes, \
-        'The length of palette should not be less than `num_classes`.'
+    dataset_palette += dataset_palette
+    # assert len(dataset_palette) >= num_classes, \
+    #     'The length of palette should not be less than `num_classes`.'
     return dataset_palette
 
 

@@ -277,6 +277,7 @@ class Mask2FormerHead(MaskFormerHead):
         # shape (batch_size, num_queries)
         label_weights = torch.stack(label_weights_list, dim=0)
         # shape (num_total_gts, h, w)
+
         mask_targets = torch.cat(mask_targets_list, dim=0)
         # shape (batch_size, num_queries)
         mask_weights = torch.stack(mask_weights_list, dim=0)

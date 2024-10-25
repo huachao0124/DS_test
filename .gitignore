@@ -116,6 +116,13 @@ data
 docs/modelzoo_statistics.md
 mmdet/.mim
 work_dirs/
+outputs/
+ckpts
+bert-base-uncased
+data.bin
+nltk_data
+ldm
+detseg_utils_3
 
 # Pytorch
 *.pth

@@ -79,6 +79,7 @@ class ContrastiveEmbed(nn.Module):
             res = res / math.sqrt(visual_feat.shape[-1])
         if self.bias is not None:
             res = res + self.bias
+        
         res.masked_fill_(~text_token_mask[:, None, :], float('-inf'))
 
         new_res = torch.full((*res.shape[:-1], self.max_text_len),

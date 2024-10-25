@@ -6,7 +6,7 @@ pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINO',
+    type='GroundingDINOTB',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -90,7 +90,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHead',
+        type='GroundingDINOHeadTB',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -111,15 +111,17 @@ model = dict(
         assigner=dict(
             type='HungarianAssigner',
             match_costs=[
-                dict(type='BinaryFocalLossCost', weight=2.0),
+                dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
     test_cfg=dict(max_per_img=300))
 
 # dataset settings
+data_root = 'data/coco/'
+
 train_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=_base_.backend_args),
+    dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(type='RandomFlip', prob=0.5),
     dict(
@@ -153,19 +155,14 @@ train_pipeline = [
                     keep_ratio=True)
             ]
         ]),
-    dict(type='FilterAnnotations', min_gt_bbox_wh=(1e-2, 1e-2)),
-    dict(
-        type='RandomSamplingNegPos',
-        tokenizer_name=lang_model_name,
-        num_sample_negative=85,
-        max_tokens=256),
     dict(type='ConcatPrompt'),
     dict(
         type='PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
-                   'custom_entities', 'tokens_positive', 'dataset_mode'))
+                   'custom_entities'))
 ]
+
 
 test_pipeline = [
     dict(
@@ -185,29 +182,17 @@ test_pipeline = [
                    'tokens_positive'))
 ]
 
-dataset_type = 'ODVGDataset'
-data_root = 'data/objects365v1/'
-
-coco_od_dataset = dict(
-    type=dataset_type,
-    data_root=data_root,
-    ann_file='objects365_train_od.json',
-    label_map_file='o365v1_label_map.json',
-    data_prefix=dict(img='train/'),
-    filter_cfg=dict(filter_empty_gt=False),
-    pipeline=train_pipeline,
-    return_classes=True,
-    backend_args=None)
 
 train_dataloader = dict(
-    _delete_=True,
-    batch_size=4,
-    num_workers=4,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
-    batch_sampler=dict(type='AspectRatioBatchSampler'),
-    dataset=dict(type='ConcatDataset', datasets=[coco_od_dataset]))
-
+    dataset=dict(
+        _delete_=True,
+        type='CocoDataset',
+        data_root=data_root,
+        ann_file='annotations/instances_train2017.json',
+        data_prefix=dict(img='train2017/'),
+        return_classes=True,
+        filter_cfg=dict(filter_empty_gt=False, min_size=32),
+        pipeline=train_pipeline))
 val_dataloader = dict(
     dataset=dict(pipeline=test_pipeline, return_classes=True))
 test_dataloader = val_dataloader
@@ -221,29 +206,49 @@ optim_wrapper = dict(
     paramwise_cfg=dict(
         custom_keys={
             'absolute_pos_embed': dict(decay_mult=0.),
-            'backbone': dict(lr_mult=0.1),
-            'language_model': dict(lr_mult=0.1),
+            'backbone': dict(lr_mult=0.0),
+            'language_model': dict(lr_mult=0.0),
         }))
 
 # learning policy
-max_epochs = 30
+max_epochs = 1
 param_scheduler = [
-    dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
     dict(
         type='MultiStepLR',
         begin=0,
         end=max_epochs,
         by_epoch=True,
-        milestones=[19, 26],
+        milestones=[8, 11],
         gamma=0.1)
 ]
 
 train_cfg = dict(
     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 
+# param_scheduler = [
+#     dict(
+#         type='MultiStepLR',
+#         begin=0,
+#         end=38038,
+#         by_epoch=False,
+#         milestones=[30000, 36000],
+#         gamma=0.1)
+# ]
+
+# train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_interval=1)
+
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
 # base_batch_size = (16 GPUs) x (2 samples per GPU)
-auto_scale_lr = dict(base_batch_size=64)
+# auto_scale_lr = dict(base_batch_size=64)
+auto_scale_lr = dict(base_batch_size=16)
 
-default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'))
+default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
+                     checkpoint=dict(type='CheckpointHook', interval=1, by_epoch=True),)
+
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'  # noqa
+load_from = 'ckpts/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'
+
+
+
+

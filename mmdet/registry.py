@@ -44,11 +44,11 @@ LOOPS = Registry(
     'loop', parent=MMENGINE_LOOPS, locations=['mmdet.engine.runner'])
 # manage all kinds of hooks like `CheckpointHook`
 HOOKS = Registry(
-    'hook', parent=MMENGINE_HOOKS, locations=['mmdet.engine.hooks'])
+    'hook', parent=MMENGINE_HOOKS, locations=['mmdet.engine.hooks', 'mmdet.detseg_utils'])
 
 # manage data-related modules
 DATASETS = Registry(
-    'dataset', parent=MMENGINE_DATASETS, locations=['mmdet.datasets'])
+    'dataset', parent=MMENGINE_DATASETS, locations=['mmdet.datasets', 'mmdet.detseg_utils'])
 DATA_SAMPLERS = Registry(
     'data sampler',
     parent=MMENGINE_DATA_SAMPLERS,
@@ -56,10 +56,10 @@ DATA_SAMPLERS = Registry(
 TRANSFORMS = Registry(
     'transform',
     parent=MMENGINE_TRANSFORMS,
-    locations=['mmdet.datasets.transforms'])
+    locations=['mmdet.datasets.transforms', 'mmdet.detseg_utils'])
 
 # manage all kinds of modules inheriting `nn.Module`
-MODELS = Registry('model', parent=MMENGINE_MODELS, locations=['mmdet.models'])
+MODELS = Registry('model', parent=MMENGINE_MODELS, locations=['mmdet.models', 'mmdet.detseg_utils'])
 # manage all kinds of model wrappers like 'MMDistributedDataParallel'
 MODEL_WRAPPERS = Registry(
     'model_wrapper',
@@ -93,7 +93,7 @@ PARAM_SCHEDULERS = Registry(
     locations=['mmdet.engine.schedulers'])
 # manage all kinds of metrics
 METRICS = Registry(
-    'metric', parent=MMENGINE_METRICS, locations=['mmdet.evaluation'])
+    'metric', parent=MMENGINE_METRICS, locations=['mmdet.evaluation', 'mmdet.detseg_utils'])
 # manage evaluator
 EVALUATOR = Registry(
     'evaluator', parent=MMENGINE_EVALUATOR, locations=['mmdet.evaluation'])
@@ -106,7 +106,7 @@ TASK_UTILS = Registry(
 VISUALIZERS = Registry(
     'visualizer',
     parent=MMENGINE_VISUALIZERS,
-    locations=['mmdet.visualization'])
+    locations=['mmdet.visualization', 'mmdet.detseg_utils'])
 # manage visualizer backend
 VISBACKENDS = Registry(
     'vis_backend',

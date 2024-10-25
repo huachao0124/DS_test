@@ -2,11 +2,11 @@ _base_ = [
     '../_base_/datasets/coco_detection.py',
     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
 ]
-pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth'  # noqa
+
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINO',
+    type='GroundingDINOTB',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -28,25 +28,26 @@ model = dict(
     ),
     backbone=dict(
         type='SwinTransformer',
-        embed_dims=96,
-        depths=[2, 2, 6, 2],
-        num_heads=[3, 6, 12, 24],
-        window_size=7,
+        pretrain_img_size=384,
+        embed_dims=128,
+        depths=[2, 2, 18, 2],
+        num_heads=[4, 8, 16, 32],
+        window_size=12,
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
         drop_rate=0.,
         attn_drop_rate=0.,
-        drop_path_rate=0.2,
+        drop_path_rate=0.3,
         patch_norm=True,
         out_indices=(1, 2, 3),
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
+        init_cfg=None),
     neck=dict(
         type='ChannelMapper',
-        in_channels=[192, 384, 768],
+        in_channels=[256, 512, 1024],
         kernel_size=1,
         out_channels=256,
         act_cfg=None,
@@ -90,7 +91,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHead',
+        type='GroundingDINOHeadTB',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -111,7 +112,7 @@ model = dict(
         assigner=dict(
             type='HungarianAssigner',
             match_costs=[
-                dict(type='BinaryFocalLossCost', weight=2.0),
+                dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
@@ -221,29 +222,45 @@ optim_wrapper = dict(
     paramwise_cfg=dict(
         custom_keys={
             'absolute_pos_embed': dict(decay_mult=0.),
-            'backbone': dict(lr_mult=0.1),
-            'language_model': dict(lr_mult=0.1),
+            'backbone': dict(lr_mult=0.0),
+            'language_model': dict(lr_mult=0.0),
         }))
 
 # learning policy
-max_epochs = 30
+max_epochs = 1
+# param_scheduler = [
+#     dict(
+#         type='MultiStepLR',
+#         begin=0,
+#         end=max_epochs,
+#         by_epoch=True,
+#         milestones=[8, 11],
+#         gamma=0.1)
+# ]
+
+# train_cfg = dict(
+#     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
+
 param_scheduler = [
-    dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
     dict(
         type='MultiStepLR',
         begin=0,
-        end=max_epochs,
-        by_epoch=True,
-        milestones=[19, 26],
+        end=38038,
+        by_epoch=False,
+        milestones=[30000, 36000],
         gamma=0.1)
 ]
 
-train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_interval=10000)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
 # base_batch_size = (16 GPUs) x (2 samples per GPU)
-auto_scale_lr = dict(base_batch_size=64)
+# auto_scale_lr = dict(base_batch_size=64)
+auto_scale_lr = dict(base_batch_size=16)
 
-default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'))
+default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
+                     checkpoint=dict(type='CheckpointHook', interval=10000, by_epoch=False),)
+
+load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-b_pretrain_obj365_goldg_v3det/grounding_dino_swin-b_pretrain_obj365_goldg_v3de-f83eef00.pth'  # noqa
