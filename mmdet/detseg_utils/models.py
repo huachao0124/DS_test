@@ -46,6 +46,7 @@ from mmdet.models.layers import inverse_sigmoid
 from mmdet.models.utils import multi_apply
 from mmseg.structures import SegDataSample
 from mmseg.models.utils import resize
+from mmseg.models import Mask2FormerHead
 
 try:
     from fairscale.nn.checkpoint import checkpoint_wrapper
@@ -1500,6 +1501,9 @@ class GroundingDINOTB(DINO):
         self._special_tokens = '. '
         self.use_autocast = use_autocast
         super().__init__(*args, **kwargs)
+        
+        for p in self.backbone.parameters():
+            p.requires_grad_(False)
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
@@ -2777,7 +2781,8 @@ class GroundingDINOHeadTB(GroundingDINOHead):
         img_shape = img_meta['img_shape']
         # exclude background
         num_classes = 1
-        if self.loss_cls.use_sigmoid:
+        # if self.loss_cls.use_sigmoid:
+        if True:
             cls_score = cls_score.sigmoid()
             scores, indexes = cls_score.view(-1).topk(max_per_img)
             det_labels = indexes % num_classes
@@ -3113,10 +3118,14 @@ class GroundingDINOTBSeg(GroundingDINOTB):
                  seg_decoder: OptConfigType = None,
                  roi_head: OptConfigType = None,
                  sam: OptConfigType = None,
+                 loss_contrastive: ConfigType = None,
                  **kwargs):
         self.seg_decoder = seg_decoder
         self.roi_head = roi_head
         self.sam = sam
+        
+        if loss_contrastive is not None:
+            self.loss_contrastive = MODELS.build(loss_contrastive)
 
         super().__init__(**kwargs)
         self._freeze_modules()
@@ -3314,82 +3323,82 @@ class GroundingDINOTBSeg(GroundingDINOTB):
 
         batch_data_samples =  self.postprocess_result(seg_logits, batch_data_samples)
 
-        # if isinstance(text_prompts[0], list):
-        #     # chunked text prompts, only bs=1 is supported
-        #     assert len(batch_inputs) == 1
-        #     count = 0
-        #     results_list = []
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
 
-        #     entities = [[item for lst in entities[0] for item in lst]]
+            entities = [[item for lst in entities[0] for item in lst]]
 
-        #     for b in range(len(text_prompts[0])):
-        #         text_prompts_once = [text_prompts[0][b]]
-        #         token_positive_maps_once = token_positive_maps[0][b]
-        #         text_dict = self.language_model(text_prompts_once)
-        #         # text feature map layer
-        #         if self.text_feat_map is not None:
-        #             text_dict['embedded'] = self.text_feat_map(
-        #                 text_dict['embedded'])
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
 
-        #         batch_data_samples[
-        #             0].token_positive_map = token_positive_maps_once
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
 
-        #         head_inputs_dict, _ = self.forward_transformer(
-        #             copy.deepcopy(visual_feats), text_dict, batch_data_samples)
-        #         pred_instances = self.bbox_head.predict(
-        #             **head_inputs_dict,
-        #             rescale=rescale,
-        #             batch_data_samples=batch_data_samples)[0]
+                head_inputs_dict, _ = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
 
-        #         if len(pred_instances) > 0:
-        #             pred_instances.labels += count
-        #         count += len(token_positive_maps_once)
-        #         results_list.append(pred_instances)
-        #     results_list = [results_list[0].cat(results_list)]
-        #     is_rec_tasks = [False] * len(results_list)
-        # else:
-        #     # extract text feats
-        #     text_dict = self.language_model(list(text_prompts))
-        #     # text feature map layer
-        #     if self.text_feat_map is not None:
-        #         text_dict['embedded'] = self.text_feat_map(
-        #             text_dict['embedded'])
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
 
-        #     is_rec_tasks = []
-        #     for i, data_samples in enumerate(batch_data_samples):
-        #         if token_positive_maps[i] is not None:
-        #             is_rec_tasks.append(False)
-        #         else:
-        #             is_rec_tasks.append(True)
-        #         data_samples.token_positive_map = token_positive_maps[i]
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
 
-        #     head_inputs_dict, _ = self.forward_transformer(
-        #         visual_feats, text_dict, batch_data_samples)
-        #     results_list = self.bbox_head.predict(
-        #         **head_inputs_dict,
-        #         rescale=rescale,
-        #         batch_data_samples=batch_data_samples)
+            head_inputs_dict, _ = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
 
-        # for data_sample, pred_instances, entity, is_rec_task in zip(
-        #         batch_data_samples, results_list, entities, is_rec_tasks):
-        #     if len(pred_instances) > 0:
-        #         label_names = []
-        #         for labels in pred_instances.labels:
-        #             if is_rec_task:
-        #                 label_names.append(entity)
-        #                 continue
-        #             if labels >= len(entity):
-        #                 warnings.warn(
-        #                     'The unexpected output indicates an issue with '
-        #                     'named entity recognition. You can try '
-        #                     'setting custom_entities=True and running '
-        #                     'again to see if it helps.')
-        #                 label_names.append('unobject')
-        #             else:
-        #                 label_names.append(entity[labels])
-        #         # for visualization
-        #         pred_instances.label_names = label_names
-        #     data_sample.pred_instances = pred_instances
+        for data_sample, pred_instances, entity, is_rec_task in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
             
         return batch_data_samples
 
@@ -3963,4 +3972,111 @@ class GroundingDINOHeadIoU(GroundingDINOHead):
                               batch_gt_instances, batch_img_metas, dn_meta)
         losses = self.loss_by_feat(*loss_inputs)
         return losses
+
+
+
+# 添加contrastive loss
+@MODELS.register_module()
+class Mask2FormerHeadAnomaly(Mask2FormerHead):
+    """Implements the Mask2Former head.
+
+    See `Mask2Former: Masked-attention Mask Transformer for Universal Image
+    Segmentation <https://arxiv.org/abs/2112.01527>`_ for details.
+
+    Args:
+        num_classes (int): Number of classes. Default: 150.
+        align_corners (bool): align_corners argument of F.interpolate.
+            Default: False.
+        ignore_index (int): The label index to be ignored. Default: 255.
+    """
+
+    def __init__(self,
+                 loss_contrastive: ConfigType = None, 
+                 **kwargs):
+        super().__init__(**kwargs)
+
+        self.loss_contrastive = None
+        if loss_contrastive is not None:
+            self.loss_contrastive = MODELS.build(loss_contrastive)    
+    
+    def loss_by_feat(self, all_cls_scores: Tensor, all_mask_preds: Tensor,
+                     batch_gt_instances: List[InstanceData],
+                     batch_img_metas: List[dict]) -> Dict[str, Tensor]:
+        """Loss function.
+
+        Args:
+            all_cls_scores (Tensor): Classification scores for all decoder
+                layers with shape (num_decoder, batch_size, num_queries,
+                cls_out_channels). Note `cls_out_channels` should includes
+                background.
+            all_mask_preds (Tensor): Mask scores for all decoder layers with
+                shape (num_decoder, batch_size, num_queries, h, w).
+            batch_gt_instances (list[obj:`InstanceData`]): each contains
+                ``labels`` and ``masks``.
+            batch_img_metas (list[dict]): List of image meta information.
+
+        Returns:
+            dict[str, Tensor]: A dictionary of loss components.
+        """
+        num_dec_layers = len(all_cls_scores)
+        batch_gt_instances_list = [
+            batch_gt_instances for _ in range(num_dec_layers)
+        ]
+        img_metas_list = [batch_img_metas for _ in range(num_dec_layers)]
+        losses_cls, losses_mask, losses_dice, losses_contrastive = multi_apply(
+            self._loss_by_feat_single, all_cls_scores, all_mask_preds,
+            batch_gt_instances_list, img_metas_list)
+
+        loss_dict = dict()
+        # loss from the last decoder layer
+        loss_dict['loss_cls'] = losses_cls[-1]
+        loss_dict['loss_mask'] = losses_mask[-1]
+        loss_dict['loss_dice'] = losses_dice[-1]
+        
+        
+        if losses_contrastive[0] is not None:
+            loss_dict['loss_contrastive'] = losses_contrastive[-1]
+        # loss from other decoder layers
+        num_dec_layer = 0
+        for loss_cls_i, loss_mask_i, loss_dice_i, loss_contrastive in zip(
+                losses_cls[:-1], losses_mask[:-1], losses_dice[:-1], losses_contrastive[:-1]):
+            loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
+            loss_dict[f'd{num_dec_layer}.loss_mask'] = loss_mask_i
+            loss_dict[f'd{num_dec_layer}.loss_dice'] = loss_dice_i
+            if loss_contrastive is not None:
+                loss_dict[f'd{num_dec_layer}.loss_contrastive'] = loss_contrastive
+            num_dec_layer += 1
+        return loss_dict
+    
+    
+    def _loss_by_feat_single(self, cls_scores: Tensor, mask_preds: Tensor,
+                             batch_gt_instances: List[InstanceData],
+                             batch_img_metas: List[dict]) -> Tuple[Tensor]:
+        """Loss function for outputs from a single decoder layer.
+
+        Args:
+            cls_scores (Tensor): Mask score logits from a single decoder layer
+                for all images. Shape (batch_size, num_queries,
+                cls_out_channels). Note `cls_out_channels` should includes
+                background.
+            mask_preds (Tensor): Mask logits for a pixel decoder for all
+                images. Shape (batch_size, num_queries, h, w).
+            batch_gt_instances (list[obj:`InstanceData`]): each contains
+                ``labels`` and ``masks``.
+            batch_img_metas (list[dict]): List of image meta information.
+
+        Returns:
+            tuple[Tensor]: Loss components for outputs from a single \
+                decoder layer.
+        """
+        
+        loss_contrastive = None
+        if self.loss_contrastive is not None:
+            loss_contrastive = self.loss_contrastive(cls_scores, \
+                                                    mask_preds, batch_gt_instances, batch_img_metas)
+
+        loss_cls, loss_mask, loss_dice = super()._loss_by_feat_single(cls_scores, \
+                                                    mask_preds, batch_gt_instances, batch_img_metas)
+
+        return loss_cls, loss_mask, loss_dice, loss_contrastive
     

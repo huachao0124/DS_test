@@ -122,7 +122,7 @@ model = dict(
             ])),
     test_cfg=dict(max_per_img=300),
     seg_decoder=dict(
-                type='Mask2FormerHeadAnomaly',
+                type='mmseg.Mask2FormerHead',
                 in_channels=[128, 256, 512, 1024],
                 strides=[4, 8, 16, 32],
                 feat_channels=256,
@@ -208,7 +208,6 @@ model = dict(
                     naive_dice=True,
                     eps=1.0,
                     loss_weight=5.0),
-                loss_contrastive=dict(type='ContrastiveLoss'),
                 train_cfg=dict(
                     num_points=12544,
                     oversample_ratio=3.0,
@@ -246,7 +245,6 @@ optim_wrapper = dict(
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    dict(type='PasteCocoObjects', mix_ratio=0.2),
     # dict(type='RandomFlip', prob=0.5),
     dict(
         type='mmseg.RandomChoiceResize',
@@ -273,7 +271,7 @@ test_pipeline = [
         keep_ratio=True,
         backend='pillow'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    dict(type='UnifyGT', label_map={0: 0, 2: 1}), 
+    # dict(type='UnifyGT', label_map={0: 0, 2: 1}), 
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
@@ -281,12 +279,10 @@ test_pipeline = [
 ]
 
 # dataset settings
-train_dataset_type = 'CityscapesWithCocoDataset'
+train_dataset_type = 'CityscapesDatasetDetSeg'
 train_data_root = 'data/cityscapes/'
-test_dataset_type = 'RoadAnomalyDataset'
-test_data_root = 'data/RoadAnomaly'
-# test_dataset_type = 'FSLostAndFoundDataset'
-# test_data_root = 'data/FS_LostFound'
+test_dataset_type = 'CityscapesDatasetDetSeg'
+test_data_root = 'data/cityscapes/'
 
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
             'traffic light', 'traffic sign', 'vegetation', 'terrain',
@@ -307,29 +303,32 @@ train_dataloader = dict(_delete_=True,
                         # batch_sampler=dict(type='AspectRatioBatchSampler'),
                         sampler=dict(type='InfiniteSampler', shuffle=True),
                         # batch_sampler=dict(type='InfiniteBatchSampler'),
-                        dataset=dict(type=train_dataset_type, 
-                                     coco_file_path='data/coco/',
-                                     data_root=train_data_root,
+                        dataset=dict(
+                                     type=train_dataset_type, 
+                                     data_root=train_data_root, 
+                                     metainfo=metainfo,
+                                     filter_cfg=dict(filter_empty_gt=False, min_size=32),
+                                     return_classes=True,
                                      data_prefix=dict(
-                                        img_path='leftImg8bit/train', seg_map_path='gtFine/train'),
+                                        img='leftImg8bit/train', seg='gtFine/train'),
+                                     ann_file='annotations/instancesonly_filtered_gtFine_train.json',
                                      pipeline=train_pipeline))
-# val_dataloader = dict(dataset=dict(type=test_dataset_type,
-#                                      data_root=test_data_root,
-#                                      pipeline=test_pipeline))
 val_dataloader = dict(dataset=dict(_delete_=True,
                                     type=test_dataset_type, 
                                     data_root=test_data_root, 
                                     pipeline=test_pipeline, 
-                                    #  img_suffix='.webp',
-                                    # img_suffix='.jpg',
+                                    metainfo=metainfo,
+                                    filter_cfg=dict(filter_empty_gt=False, min_size=32),
+                                    return_classes=True,
                                     data_prefix=dict(
-                                        img_path='images', seg_map_path='labels_masks'),))
+                                        img='leftImg8bit/val', seg='gtFine/val'),
+                                    ann_file='annotations/instancesonly_filtered_gtFine_val.json',))
 test_dataloader = val_dataloader
-val_evaluator = dict(type='AnomalyMetricRbA')
+val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU'])
 test_evaluator = val_evaluator
 
 # training schedule for 90k
-train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=5000, val_interval=5000)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=90003)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 default_hooks = dict(
@@ -337,16 +336,13 @@ default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50, log_metric_by_epoch=False),
     param_scheduler=dict(type='ParamSchedulerHook'),
     checkpoint=dict(
-        type='CheckpointHook', by_epoch=False, interval=5000),
+        type='CheckpointHook', by_epoch=False, interval=10000),
     sampler_seed=dict(type='DistSamplerSeedHook'),
-    # visualization=dict(type='SegVisualizationWithResizeHook', draw=True, interval=1))
-    visualization=dict(type='GroundingVisualizationHook', draw=True, interval=1, score_thr=0.0))
+    visualization=dict(draw=True, interval=1))
 
 vis_backends = [dict(type='LocalVisBackend')]
 visualizer = dict(
-    type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
-# visualizer = dict(
-#     type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+    type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 log_processor = dict(by_epoch=False)
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
@@ -354,4 +350,4 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
+load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_obj365/iter_38038.pth'

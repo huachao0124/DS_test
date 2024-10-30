@@ -262,5 +262,6 @@ auto_scale_lr = dict(base_batch_size=16)
 default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
                      checkpoint=dict(type='CheckpointHook', interval=10000, by_epoch=False),)
 
-load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
+# load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
+load_from = '/home/arima/RbA/rba_det.pth'
 # load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-b_pretrain_obj365_goldg_v3det/grounding_dino_swin-b_pretrain_obj365_goldg_v3de-f83eef00.pth'  # noqa

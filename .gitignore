@@ -123,6 +123,7 @@ data.bin
 nltk_data
 ldm
 detseg_utils_3
+samples
 
 # Pytorch
 *.pth

@@ -29,9 +29,9 @@ for image in images[:10]:
     
     os.system(f"python demo/image_demo.py \
                             {image} \
-                            configs/detseg/grounding_dino_bbyy_swin-t_finetune_coco.py \
+                            configs/detseg/grounding_dino_bbyy_swin-b_finetune_obj365.py \
                             --pred-score-thr 0.1 \
-                            --weights work_dirs/grounding_dino_bbyy_swin-t_finetune_coco/epoch_1.pth \
+                            --weights work_dirs/grounding_dino_bbyy_swin-b_finetune_obj365/iter_20000.pth \
                             --texts 'road. sidewalk. building. wall. fence. pole. traffic light. traffic sign. vegetation. terrain. sky. person. rider. car. truck. bus. train. motorcycle. bicycle'")
     
     

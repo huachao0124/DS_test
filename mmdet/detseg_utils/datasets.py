@@ -85,9 +85,9 @@ class RoadAnomalyDataset(Dataset):
         data_info = {'img_path': os.path.join(self.data_root, 'frames', self.img_list[idx])}
         data_info['reduce_zero_label'] = False
         data_info['seg_map_path'] = os.path.join(self.data_root, 'frames', \
-                        self.img_list[idx].replace('jpg', 'labels'), 'labels_semantic.png')
+                        self.img_list[idx].replace('webp', 'labels'), 'labels_semantic.png')
         data_info['seg_fields'] = []
-        
+        data_info['text'] = self.metainfo['classes']
         data_info = self.pipeline(data_info)
         return data_info
 
@@ -453,7 +453,7 @@ class CocoSemSeg(Dataset):
                 
         for filename in glob.glob(os.path.join(data_root, "annotations", "ood_seg_" + self.split, '*.png')):
             self.targets.append(filename)
-            self.images.append(filename.replace('annotations', 'images').replace('ood_seg_', '').replace('.png', '.jpg'))
+            self.images.append(filename.replace('annotations/', '').replace('ood_seg_', '').replace('.png', '.jpg'))
         
         if shuffle:
             zipped = list(zip(self.images, self.targets))
@@ -677,4 +677,16 @@ class PasteCocoObjects(BaseTransform):
         
         return results
     
+
+@TRANSFORMS.register_module()
+class UnifyGT(BaseTransform):
+    def __init__(self, label_map={0: 0, 1: 1}):
+        super().__init__()
+        self.label_map = label_map
     
+    def transform(self, results: dict) -> dict:        
+        new_gt_seg_map = np.zeros_like(results['gt_seg_map'])
+        for k, v in self.label_map.items():
+            new_gt_seg_map[results['gt_seg_map'] == k] = v
+        results['gt_seg_map'] = new_gt_seg_map
+        return results
