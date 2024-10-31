@@ -45,10 +45,26 @@ class ConcatPrompt(BaseTransform):
         else:
             # results['text'] = 'All foreground objects. ' + '. '.join(results['text'])
             # results['text'] = ('All foreground objects', ) + results['text']
-            # results['text'] = ('objects', ) + results['text']
-            pass
+            results['text'] = ('objects', ) + results['text']
+            if 'tokens_positive' in results:
+                if results['tokens_positive'] is not None:
+                    for k, v in results['tokens_positive'].items():
+                        results['tokens_positive'][k] = (np.array(v) + 9).tolist()
         return results
 
+
+@TRANSFORMS.register_module()
+class ReplacePrompt(BaseTransform):
+    def transform(self, results: dict) -> dict:
+        if (isinstance(results['text'], str)):
+            results['text'] = 'road. sidewalk. building. wall. fence. pole. traffic light. traffic sign. vegetation. terrain. sky. person. rider. car. truck. bus. train. motorcycle. bicycle'
+        else:
+            results['text'] = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+                                    'traffic light', 'traffic sign', 'vegetation', 'terrain',
+                                    'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
+                                    'motorcycle', 'bicycle')
+        results['gt_bboxes_labels'] = np.zeros_like(results['gt_bboxes_labels'])
+        return results
 
 
 @DATASETS.register_module()
@@ -77,6 +93,7 @@ class RoadAnomalyDataset(Dataset):
         self.data_root = data_root
         self.pipeline = Compose(pipeline)
         self.caption_prompt = caption_prompt
+        self.metainfo = RoadAnomalyDataset.METAINFO
     
     def __len__(self):
         return len(self.img_list)

@@ -3,10 +3,11 @@ _base_ = [
     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
 ]
 
+pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINOTB',
+    type='GroundingDINOPT',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -44,7 +45,7 @@ model = dict(
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=None),
+        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
     neck=dict(
         type='ChannelMapper',
         in_channels=[256, 512, 1024],
@@ -155,11 +156,12 @@ train_pipeline = [
             ]
         ]),
     dict(type='FilterAnnotations', min_gt_bbox_wh=(1e-2, 1e-2)),
-    dict(
-        type='RandomSamplingNegPos',
-        tokenizer_name=lang_model_name,
-        num_sample_negative=85,
-        max_tokens=256),
+    # dict(
+    #     type='RandomSamplingNegPos',
+    #     tokenizer_name=lang_model_name,
+    #     num_sample_negative=85,
+    #     max_tokens=256),
+    dict(type='ReplacePrompt'),
     dict(type='ConcatPrompt'),
     dict(
         type='PackDetInputs',
@@ -251,7 +253,7 @@ param_scheduler = [
         gamma=0.1)
 ]
 
-train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_interval=10000)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_interval=39000)
 
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
@@ -260,8 +262,7 @@ train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_
 auto_scale_lr = dict(base_batch_size=16)
 
 default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
-                     checkpoint=dict(type='CheckpointHook', interval=10000, by_epoch=False),)
+                     checkpoint=dict(type='CheckpointHook', interval=5000, by_epoch=False),)
 
-# load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
-load_from = '/home/arima/RbA/rba_det.pth'
+load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
 # load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-b_pretrain_obj365_goldg_v3det/grounding_dino_swin-b_pretrain_obj365_goldg_v3de-f83eef00.pth'  # noqa

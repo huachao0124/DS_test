@@ -17,6 +17,7 @@ from mmdet.models.layers import SinePositionalEncoding
 from mmdet.models.layers.transformer.grounding_dino_layers import (
     GroundingDinoTransformerDecoder, GroundingDinoTransformerDecoderLayer, GroundingDinoTransformerEncoder)
 from mmdet.models.detectors.dino import DINO
+from mmdet.models.detectors.grounding_dino import GroundingDINO
 from mmdet.models.detectors.glip import (create_positive_map, create_positive_map_label_to_token,
                    run_ner)
 
@@ -2477,7 +2478,7 @@ class GroundingDINOHeadTB(GroundingDINOHead):
     def _init_layers(self) -> None:
         """Initialize classification branch and regression branch of head."""
         super()._init_layers()
-        self.cls_branches.requires_grad_(False) 
+        self.cls_branches.requires_grad_(False)
         # modify
         # ==================================================================
         fc_cls_bbyy = Linear(self.embed_dims, 1)
@@ -2545,12 +2546,14 @@ class GroundingDINOHeadTB(GroundingDINOHead):
         pos_gt_bboxes = gt_bboxes[pos_assigned_gt_inds.long(), :]
 
         # modify
+        # ==================================================================
         # label targets
         labels = gt_bboxes.new_full((num_bboxes, ),
                                     1,
                                     dtype=torch.long)
         labels[pos_inds] = gt_labels[pos_assigned_gt_inds]
         label_weights = gt_bboxes.new_ones(num_bboxes)
+        # ==================================================================
 
         # bbox targets
         bbox_targets = torch.zeros_like(bbox_pred, dtype=gt_bboxes.dtype)
@@ -2737,8 +2740,8 @@ class GroundingDINOHeadTB(GroundingDINOHead):
             cls_score_bbyy = cls_scores_bbyy[img_id]
             bbox_pred = bbox_preds[img_id]
             img_meta = batch_img_metas[img_id]
-            # token_positive_maps = batch_token_positive_maps[img_id]
-            # results = self._predict_by_feat_single(cls_score, bbox_pred,
+            token_positive_maps = batch_token_positive_maps[img_id]
+            # results = self._predict_by_feat_single(cls_score, bbox_pred[:self.num_queries],
             #                                        token_positive_maps,
             #                                        img_meta, rescale)
             results = self._predict_by_feat_single_bbyy(cls_score_bbyy, bbox_pred[-self.num_queries_bbyy:],
@@ -2850,11 +2853,15 @@ class GroundingDINOHeadTB(GroundingDINOHead):
         """
         batch_gt_instances = []
         batch_img_metas = []
+
+        # modify: all gt labels are set to 0
+        # ==================================================================
         for data_sample in batch_data_samples:
             batch_img_metas.append(data_sample.metainfo)
             gt_instances = data_sample.gt_instances
             gt_instances.labels = torch.zeros_like(gt_instances.labels)
             batch_gt_instances.append(gt_instances)
+        # ==================================================================
 
         outs = self(hidden_states, references, memory_text, text_token_mask)
         self.text_masks = text_token_mask
@@ -3323,82 +3330,82 @@ class GroundingDINOTBSeg(GroundingDINOTB):
 
         batch_data_samples =  self.postprocess_result(seg_logits, batch_data_samples)
 
-        if isinstance(text_prompts[0], list):
-            # chunked text prompts, only bs=1 is supported
-            assert len(batch_inputs) == 1
-            count = 0
-            results_list = []
+        # if isinstance(text_prompts[0], list):
+        #     # chunked text prompts, only bs=1 is supported
+        #     assert len(batch_inputs) == 1
+        #     count = 0
+        #     results_list = []
 
-            entities = [[item for lst in entities[0] for item in lst]]
+        #     entities = [[item for lst in entities[0] for item in lst]]
 
-            for b in range(len(text_prompts[0])):
-                text_prompts_once = [text_prompts[0][b]]
-                token_positive_maps_once = token_positive_maps[0][b]
-                text_dict = self.language_model(text_prompts_once)
-                # text feature map layer
-                if self.text_feat_map is not None:
-                    text_dict['embedded'] = self.text_feat_map(
-                        text_dict['embedded'])
+        #     for b in range(len(text_prompts[0])):
+        #         text_prompts_once = [text_prompts[0][b]]
+        #         token_positive_maps_once = token_positive_maps[0][b]
+        #         text_dict = self.language_model(text_prompts_once)
+        #         # text feature map layer
+        #         if self.text_feat_map is not None:
+        #             text_dict['embedded'] = self.text_feat_map(
+        #                 text_dict['embedded'])
 
-                batch_data_samples[
-                    0].token_positive_map = token_positive_maps_once
+        #         batch_data_samples[
+        #             0].token_positive_map = token_positive_maps_once
 
-                head_inputs_dict, _ = self.forward_transformer(
-                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
-                pred_instances = self.bbox_head.predict(
-                    **head_inputs_dict,
-                    rescale=rescale,
-                    batch_data_samples=batch_data_samples)[0]
+        #         head_inputs_dict, _ = self.forward_transformer(
+        #             copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+        #         pred_instances = self.bbox_head.predict(
+        #             **head_inputs_dict,
+        #             rescale=rescale,
+        #             batch_data_samples=batch_data_samples)[0]
 
-                if len(pred_instances) > 0:
-                    pred_instances.labels += count
-                count += len(token_positive_maps_once)
-                results_list.append(pred_instances)
-            results_list = [results_list[0].cat(results_list)]
-            is_rec_tasks = [False] * len(results_list)
-        else:
-            # extract text feats
-            text_dict = self.language_model(list(text_prompts))
-            # text feature map layer
-            if self.text_feat_map is not None:
-                text_dict['embedded'] = self.text_feat_map(
-                    text_dict['embedded'])
+        #         if len(pred_instances) > 0:
+        #             pred_instances.labels += count
+        #         count += len(token_positive_maps_once)
+        #         results_list.append(pred_instances)
+        #     results_list = [results_list[0].cat(results_list)]
+        #     is_rec_tasks = [False] * len(results_list)
+        # else:
+        #     # extract text feats
+        #     text_dict = self.language_model(list(text_prompts))
+        #     # text feature map layer
+        #     if self.text_feat_map is not None:
+        #         text_dict['embedded'] = self.text_feat_map(
+        #             text_dict['embedded'])
 
-            is_rec_tasks = []
-            for i, data_samples in enumerate(batch_data_samples):
-                if token_positive_maps[i] is not None:
-                    is_rec_tasks.append(False)
-                else:
-                    is_rec_tasks.append(True)
-                data_samples.token_positive_map = token_positive_maps[i]
+        #     is_rec_tasks = []
+        #     for i, data_samples in enumerate(batch_data_samples):
+        #         if token_positive_maps[i] is not None:
+        #             is_rec_tasks.append(False)
+        #         else:
+        #             is_rec_tasks.append(True)
+        #         data_samples.token_positive_map = token_positive_maps[i]
 
-            head_inputs_dict, _ = self.forward_transformer(
-                visual_feats, text_dict, batch_data_samples)
-            results_list = self.bbox_head.predict(
-                **head_inputs_dict,
-                rescale=rescale,
-                batch_data_samples=batch_data_samples)
+        #     head_inputs_dict, _ = self.forward_transformer(
+        #         visual_feats, text_dict, batch_data_samples)
+        #     results_list = self.bbox_head.predict(
+        #         **head_inputs_dict,
+        #         rescale=rescale,
+        #         batch_data_samples=batch_data_samples)
 
-        for data_sample, pred_instances, entity, is_rec_task in zip(
-                batch_data_samples, results_list, entities, is_rec_tasks):
-            if len(pred_instances) > 0:
-                label_names = []
-                for labels in pred_instances.labels:
-                    if is_rec_task:
-                        label_names.append(entity)
-                        continue
-                    if labels >= len(entity):
-                        warnings.warn(
-                            'The unexpected output indicates an issue with '
-                            'named entity recognition. You can try '
-                            'setting custom_entities=True and running '
-                            'again to see if it helps.')
-                        label_names.append('unobject')
-                    else:
-                        label_names.append(entity[labels])
-                # for visualization
-                pred_instances.label_names = label_names
-            data_sample.pred_instances = pred_instances
+        # for data_sample, pred_instances, entity, is_rec_task in zip(
+        #         batch_data_samples, results_list, entities, is_rec_tasks):
+        #     if len(pred_instances) > 0:
+        #         label_names = []
+        #         for labels in pred_instances.labels:
+        #             if is_rec_task:
+        #                 label_names.append(entity)
+        #                 continue
+        #             if labels >= len(entity):
+        #                 warnings.warn(
+        #                     'The unexpected output indicates an issue with '
+        #                     'named entity recognition. You can try '
+        #                     'setting custom_entities=True and running '
+        #                     'again to see if it helps.')
+        #                 label_names.append('unobject')
+        #             else:
+        #                 label_names.append(entity[labels])
+        #         # for visualization
+        #         pred_instances.label_names = label_names
+        #     data_sample.pred_instances = pred_instances
             
         return batch_data_samples
 
@@ -4079,4 +4086,227 @@ class Mask2FormerHeadAnomaly(Mask2FormerHead):
                                                     mask_preds, batch_gt_instances, batch_img_metas)
 
         return loss_cls, loss_mask, loss_dice, loss_contrastive
+
+
+
+@MODELS.register_module()
+class GroundingDINOPT(GroundingDINO):
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        
+        for p in self.backbone.parameters():
+            p.requires_grad_(False)
+        for p in self.memory_trans_fc.parameters():
+            p.requires_grad_(False)
+        for p in self.memory_trans_norm.parameters():
+            p.requires_grad_(False)
+        for p in self.query_embedding.parameters():
+            p.requires_grad_(False)
+
+    def _init_layers(self) -> None:
+        """Initialize layers except for backbone, neck and bbox_head."""
+        super()._init_layers()
+        
+        # modify
+        # =============================================================
+        self.num_queries_bbyy = 300
+        self.query_embedding_bbyy = nn.Embedding(self.num_queries_bbyy, self.embed_dims)
+        self.bbox_head.num_queries = self.num_queries
+        self.bbox_head.num_queries_bbyy = self.num_queries_bbyy
+        self.bbyy_embedding = nn.Embedding(1, 256)
+        self.memory_trans_fc_bbyy = nn.Linear(self.embed_dims, self.embed_dims)
+        self.memory_trans_norm_bbyy = nn.LayerNorm(self.embed_dims)
+        # =============================================================
     
+
+    def forward_transformer(
+        self,
+        img_feats: Tuple[Tensor],
+        text_dict: Dict,
+        batch_data_samples: OptSampleList = None,
+    ) -> Dict:
+        
+        # modify
+        text_dict['embedded'][:, 1:2] = text_dict['embedded'][:, 1:2] + self.bbyy_embedding.weight.unsqueeze(0)
+        
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+            img_feats, batch_data_samples)
+
+        encoder_outputs_dict = self.forward_encoder(
+            **encoder_inputs_dict, text_dict=text_dict)
+
+        tmp_dec_in, head_inputs_dict = self.pre_decoder(
+            **encoder_outputs_dict, batch_data_samples=batch_data_samples)
+        decoder_inputs_dict.update(tmp_dec_in)
+
+        decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
+        head_inputs_dict.update(decoder_outputs_dict)
+        return head_inputs_dict
+    
+
+    def pre_decoder(
+        self,
+        memory: Tensor,
+        memory_mask: Tensor,
+        spatial_shapes: Tensor,
+        memory_text: Tensor,
+        text_token_mask: Tensor,
+        batch_data_samples: OptSampleList = None,
+    ) -> Tuple[Dict]:
+        bs, _, c = memory.shape
+
+        output_memory, output_proposals = self.gen_encoder_output_proposals(
+            memory, memory_mask, spatial_shapes)
+
+        enc_outputs_class = self.bbox_head.cls_branches[
+            self.decoder.num_layers](output_memory, memory_text,
+                                     text_token_mask)
+        cls_out_features = self.bbox_head.cls_branches[
+            self.decoder.num_layers].max_text_len
+        enc_outputs_coord_unact = self.bbox_head.reg_branches[
+            self.decoder.num_layers](output_memory) + output_proposals
+
+        # NOTE The DINO selects top-k proposals according to scores of
+        # multi-class classification, while DeformDETR, where the input
+        # is `enc_outputs_class[..., 0]` selects according to scores of
+        # binary classification.
+        topk_indices = torch.topk(
+            enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+
+        topk_score = torch.gather(
+            enc_outputs_class, 1,
+            topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+        topk_coords_unact = torch.gather(
+            enc_outputs_coord_unact, 1,
+            topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+        topk_coords = topk_coords_unact.sigmoid()
+        topk_coords_unact = topk_coords_unact.detach()
+        
+        # modify
+        # =============================================================
+        output_memory_bbyy, output_proposals_bbyy = self.gen_encoder_output_proposals_bbyy(
+            memory, memory_mask, spatial_shapes)
+        enc_outputs_class_bbyy = self.bbox_head.cls_branches_bbyy[
+                        self.decoder.num_layers](output_memory_bbyy)
+        topk_indices_bbyy = torch.topk(
+            enc_outputs_class_bbyy.max(-1)[0], k=self.num_queries_bbyy, dim=1)[1]
+
+        topk_score_bbyy = torch.gather(
+            enc_outputs_class_bbyy, 1,
+            topk_indices_bbyy.unsqueeze(-1).repeat(1, 1, 1))
+        topk_coords_unact_bbyy = torch.gather(
+            enc_outputs_coord_unact, 1,
+            topk_indices_bbyy.unsqueeze(-1).repeat(1, 1, 4))
+        topk_coords_bbyy = topk_coords_unact_bbyy.sigmoid()
+        topk_coords_unact_bbyy = topk_coords_unact_bbyy.detach()
+        # =============================================================
+
+        # modify
+        # =============================================================
+        query = torch.cat((self.query_embedding.weight, self.query_embedding_bbyy.weight), dim=0)[:, None, :]
+        query = query.repeat(1, bs, 1).transpose(0, 1)
+        if self.training:
+            dn_label_query, dn_bbox_query, dn_mask, dn_meta = \
+                self.dn_query_generator(batch_data_samples)
+            query = torch.cat([dn_label_query, query], dim=1)
+            reference_points = torch.cat([dn_bbox_query, topk_coords_unact, topk_coords_unact_bbyy],
+                                         dim=1)
+            dn_mask_extend = dn_mask.new_zeros((query.size(1), query.size(1)))
+            dn_mask_extend[:dn_mask.size(0), :dn_mask.size(1)] = dn_mask
+            dn_mask_extend[dn_label_query.size(1):-self.num_queries_bbyy, -self.num_queries_bbyy:] = True
+            dn_mask_extend[-self.num_queries_bbyy:, :-self.num_queries_bbyy] = True
+        else:
+            reference_points = torch.cat([topk_coords_unact, topk_coords_unact_bbyy], dim=1)
+            dn_mask, dn_meta = None, None
+            dn_mask_extend = torch.zeros((query.size(1), query.size(1)), device=query.device, dtype=torch.bool)
+            dn_mask_extend[:self.num_queries, self.num_queries:] = True
+            dn_mask_extend[self.num_queries:, :self.num_queries] = True
+        
+        
+        query_text_mask = dn_mask_extend.new_zeros((query.size(1), text_token_mask.size(1)))
+        query_text_mask[-self.num_queries_bbyy:, 3:] = True
+        dn_mask = dn_mask_extend
+        topk_score = topk_score_bbyy
+        topk_coords = topk_coords_bbyy
+        # topk_score = torch.cat((topk_score, topk_score_bbyy), dim=1)
+        # topk_coords = torch.cat((topk_coords, topk_coords_bbyy), dim=1)
+        # =============================================================
+        reference_points = reference_points.sigmoid()
+
+        decoder_inputs_dict = dict(
+            query=query,
+            memory=memory,
+            reference_points=reference_points,
+            dn_mask=dn_mask,
+            memory_text=memory_text,
+            text_attention_mask=~text_token_mask,
+            query_text_mask=query_text_mask
+        )
+        # NOTE DINO calculates encoder losses on scores and coordinates
+        # of selected top-k encoder queries, while DeformDETR is of all
+        # encoder queries.
+        head_inputs_dict = dict(
+            enc_outputs_class=topk_score,
+            enc_outputs_coord=topk_coords,
+            dn_meta=dn_meta) if self.training else dict()
+        # append text_feats to head_inputs_dict
+        head_inputs_dict['memory_text'] = memory_text
+        head_inputs_dict['text_token_mask'] = text_token_mask
+        return decoder_inputs_dict, head_inputs_dict
+
+    def gen_encoder_output_proposals_bbyy(
+            self, memory: Tensor, memory_mask: Tensor,
+            spatial_shapes: Tensor) -> Tuple[Tensor, Tensor]:
+        bs = memory.size(0)
+        proposals = []
+        _cur = 0  # start index in the sequence of the current level
+        for lvl, HW in enumerate(spatial_shapes):
+            H, W = HW
+
+            if memory_mask is not None:
+                mask_flatten_ = memory_mask[:, _cur:(_cur + H * W)].view(
+                    bs, H, W, 1)
+                valid_H = torch.sum(~mask_flatten_[:, :, 0, 0],
+                                    1).unsqueeze(-1)
+                valid_W = torch.sum(~mask_flatten_[:, 0, :, 0],
+                                    1).unsqueeze(-1)
+                scale = torch.cat([valid_W, valid_H], 1).view(bs, 1, 1, 2)
+            else:
+                if not isinstance(HW, torch.Tensor):
+                    HW = memory.new_tensor(HW)
+                scale = HW.unsqueeze(0).flip(dims=[0, 1]).view(1, 1, 1, 2)
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(
+                    0, H - 1, H, dtype=torch.float32, device=memory.device),
+                torch.linspace(
+                    0, W - 1, W, dtype=torch.float32, device=memory.device))
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+            grid = (grid.unsqueeze(0).expand(bs, -1, -1, -1) + 0.5) / scale
+            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+            proposal = torch.cat((grid, wh), -1).view(bs, -1, 4)
+            proposals.append(proposal)
+            _cur += (H * W)
+        output_proposals = torch.cat(proposals, 1)
+        # do not use `all` to make it exportable to onnx
+        output_proposals_valid = (
+            (output_proposals > 0.01) & (output_proposals < 0.99)).sum(
+                -1, keepdim=True) == output_proposals.shape[-1]
+        # inverse_sigmoid
+        output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        if memory_mask is not None:
+            output_proposals = output_proposals.masked_fill(
+                memory_mask.unsqueeze(-1), float('inf'))
+        output_proposals = output_proposals.masked_fill(
+            ~output_proposals_valid, float('inf'))
+
+        output_memory = memory
+        if memory_mask is not None:
+            output_memory = output_memory.masked_fill(
+                memory_mask.unsqueeze(-1), float(0))
+        output_memory = output_memory.masked_fill(~output_proposals_valid,
+                                                  float(0))
+        output_memory = self.memory_trans_fc_bbyy(output_memory)
+        output_memory = self.memory_trans_norm_bbyy(output_memory)
+        # [bs, sum(hw), 2]
+        return output_memory, output_proposals

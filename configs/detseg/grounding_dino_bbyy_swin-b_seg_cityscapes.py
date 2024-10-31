@@ -5,7 +5,8 @@ _base_ = [
 
 crop_size = (1024, 512)
 
-pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window12_384_22k.pth'  # noqa
+# pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window12_384_22k.pth'  # noqa
+pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'
 lang_model_name = './bert-base-uncased'
 
 model = dict(
@@ -254,6 +255,7 @@ train_pipeline = [
     dict(type='RandomCrop', crop_size=crop_size),
     dict(type='RandomFlip', prob=0.5),
     dict(type='PhotoMetricDistortion'),
+    dict(type='ConcatPrompt'),
     dict(
         type='PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
@@ -271,7 +273,8 @@ test_pipeline = [
         keep_ratio=True,
         backend='pillow'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    # dict(type='UnifyGT', label_map={0: 0, 2: 1}), 
+    # dict(type='UnifyGT', label_map={0: 0, 2: 1}),
+    dict(type='ConcatPrompt'),
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
@@ -323,12 +326,45 @@ val_dataloader = dict(dataset=dict(_delete_=True,
                                     data_prefix=dict(
                                         img='leftImg8bit/val', seg='gtFine/val'),
                                     ann_file='annotations/instancesonly_filtered_gtFine_val.json',))
+
+
+
+
+
+
+# train_dataset_type = 'mmseg.CityscapesDataset'
+# train_data_root = 'data/cityscapes/'
+# test_dataset_type = 'mmseg.CityscapesDataset'
+# test_data_root = 'data/cityscapes/'
+
+# train_dataloader = dict(_delete_=True,
+#                         batch_size=2,
+#                         num_workers=2,
+#                         sampler=dict(type='InfiniteSampler', shuffle=True),
+#                         # batch_sampler=dict(type='InfiniteBatchSampler'),
+#                         dataset=dict(
+#                                      type=train_dataset_type, 
+#                                      data_root=train_data_root, 
+#                                     #  num_classes=19,
+#                                      data_prefix=dict(
+#                                         img_path='leftImg8bit/train', seg_map_path='gtFine/train'),
+#                                      pipeline=train_pipeline))
+# val_dataloader = dict(dataset=dict(_delete_=True,
+#                                     type=test_dataset_type, 
+#                                     data_root=test_data_root, 
+#                                     pipeline=test_pipeline, 
+#                                     data_prefix=dict(
+#                                         img_path='leftImg8bit/val', seg_map_path='gtFine/val'),))
+
+
+
+
 test_dataloader = val_dataloader
 val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU'])
 test_evaluator = val_evaluator
 
 # training schedule for 90k
-train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=90003)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=90000)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 default_hooks = dict(
@@ -338,7 +374,7 @@ default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook', by_epoch=False, interval=10000),
     sampler_seed=dict(type='DistSamplerSeedHook'),
-    visualization=dict(draw=True, interval=1))
+    visualization=dict(draw=True, interval=50))
 
 vis_backends = [dict(type='LocalVisBackend')]
 visualizer = dict(
