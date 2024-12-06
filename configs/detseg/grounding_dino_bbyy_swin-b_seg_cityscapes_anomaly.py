@@ -5,11 +5,11 @@ _base_ = [
 
 crop_size = (1024, 512)
 
-pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window12_384_22k.pth'  # noqa
+pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'  # noqa
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINOTBSeg',
+    type='GroundingDINOPTSeg',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -121,6 +121,14 @@ model = dict(
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
     test_cfg=dict(max_per_img=300),
+    roi_head=dict(
+                type='SimpleRoIHead',
+                bbox_roi_extractor=dict(
+                    type='SingleRoIExtractor',
+                    finest_scale=1,
+                    roi_layer=dict(type='RoIAlign', output_size=1, sampling_ratio=0, pool_mode='avg'),
+                    out_channels=1,
+                    featmap_strides=[1])),
     seg_decoder=dict(
                 type='Mask2FormerHeadAnomaly',
                 in_channels=[128, 256, 512, 1024],
@@ -257,6 +265,7 @@ train_pipeline = [
     dict(type='RandomCrop', crop_size=crop_size),
     dict(type='RandomFlip', prob=0.5),
     dict(type='PhotoMetricDistortion'),
+    dict(type='ConcatPrompt'),
     dict(
         type='PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
@@ -268,13 +277,14 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='Resize', scale=(1024, 512)),
-    # dict(
-    #     type='FixScaleResize',
-    #     scale=(800, 1333),
-    #     keep_ratio=True,
-    #     backend='pillow'),
+    dict(
+        type='FixScaleResize',
+        scale=(800, 1333),
+        keep_ratio=True,
+        backend='pillow'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
     # dict(type='UnifyGT', label_map={0: 0, 2: 1}),
+    dict(type='ConcatPrompt'),
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
@@ -344,10 +354,10 @@ default_hooks = dict(
     visualization=dict(type='GroundingVisualizationHook', draw=False, interval=1, score_thr=0.0))
 
 vis_backends = [dict(type='LocalVisBackend')]
-visualizer = dict(
-    type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
 # visualizer = dict(
-#     type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+    # type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
+visualizer = dict(
+    type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 log_processor = dict(by_epoch=False)
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
