@@ -124,9 +124,14 @@ nltk_data
 ldm
 detseg_utils_3
 samples
+score_results
+sam-vit-base
 
 # Pytorch
 *.pth
 *.py~
 *.sh~
 =2.0.0rc4,
+objectness_time.pdf
+std_objectness.pdf
+test_mmap.ipynb

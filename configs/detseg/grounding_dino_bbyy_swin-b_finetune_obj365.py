@@ -226,6 +226,7 @@ optim_wrapper = dict(
             'absolute_pos_embed': dict(decay_mult=0.),
             'backbone': dict(lr_mult=0.0),
             'language_model': dict(lr_mult=0.0),
+            'encoder': dict(lr_mult=0.0),
         }))
 
 # learning policy

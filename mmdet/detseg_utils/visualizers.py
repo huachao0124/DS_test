@@ -135,7 +135,10 @@ class VisualizerHeatMap(DetLocalVisualizer):
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
         heatmap = (heatmap * 255).astype(np.uint8)
         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)[:, :, ::-1]
-        drawn_img = np.concatenate((drawn_img, heatmap), axis=1)
+        # drawn_img = np.concatenate((drawn_img, heatmap), axis=1)
+
+        # drawn_img = heatmap
+        drawn_img = self.plot_mask_on_img(image, data_sample.pred_sem_seg.sem_seg.cpu().numpy())
         
         # It is convenient for users to obtain the drawn image.
         # For example, the user wants to obtain the drawn image and
@@ -149,3 +152,15 @@ class VisualizerHeatMap(DetLocalVisualizer):
             mmcv.imwrite(mmcv.rgb2bgr(drawn_img), out_file)
         else:
             self.add_image(name, drawn_img, step)
+
+
+    def plot_mask_on_img(self, img, mask):
+        red_mask = np.zeros_like(img)
+        mask = mask.squeeze(0)
+
+        red_mask[:, :, :1][mask == 1] = 255  # 设置红色通道为1
+        red_mask_on_img = img.copy()
+        red_mask_on_img[:, :, :1][mask == 1] = 0.1 * img[:, :, :1][mask == 1] + 0.9 * red_mask[:, :, :1][mask == 1]
+        # red_mask_on_img[:, :, 1:2][mask == 1] = 0 * img[:, :, 1:2][mask == 1] + 1 * red_mask[:, :, 1:2][mask == 1]
+        # red_mask_on_img[:, :, 1:2][mask == 1] = 0 * img[:, :, 1:2][mask == 1] + 1 * red_mask[:, :, 1:2][mask == 1]
+        return red_mask_on_img

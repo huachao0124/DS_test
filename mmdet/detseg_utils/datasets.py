@@ -54,6 +54,20 @@ class ConcatPrompt(BaseTransform):
 
 
 @TRANSFORMS.register_module()
+class AddPrompt(BaseTransform):
+    def __init__(self, text = ('objects', 'road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+                                'traffic light', 'traffic sign', 'vegetation', 'terrain',
+                                'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
+                                'motorcycle', 'bicycle')):
+        self.text = text
+
+    def transform(self, results: dict) -> dict:
+        results['text'] = self.text
+        results['gt_bboxes_labels'] = np.zeros_like(results['gt_bboxes_labels'])
+        return results
+
+
+@TRANSFORMS.register_module()
 class ReplacePrompt(BaseTransform):
     def transform(self, results: dict) -> dict:
         if (isinstance(results['text'], str)):
@@ -70,19 +84,19 @@ class ReplacePrompt(BaseTransform):
 @DATASETS.register_module()
 class RoadAnomalyDataset(Dataset):
     # METAINFO = dict(
-    #     classes=('anomaly', 'not anomaly'),
+    #     classes=('not anomaly', 'anomaly'),
     #     palette=[[128, 64, 128], [244, 35, 232]])
     METAINFO = dict(
         classes=('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
                  'traffic light', 'traffic sign', 'vegetation', 'terrain',
                  'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
-                 'motorcycle', 'bicycle', 'anomaly'),
-        palette=[[128, 64, 128], [244, 35, 232], [70, 70, 70], [102, 102, 156],
-                 [190, 153, 153], [153, 153, 153], [250, 170, 30], [220, 220, 0],
-                 [107, 142, 35], [152, 251, 152], [70, 130, 180],
-                 [220, 20, 60], [255, 0, 0], [0, 0, 142], [0, 0, 70],
-                 [0, 60, 100], [0, 80, 100], [0, 0, 230], [119, 11, 32], 
-                 [0, 255, 0]])
+                 'motorcycle', 'bicycle'),
+        palette=[(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
+                 (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
+                 (107, 142, 35), (152, 251, 152), (70, 130, 180),
+                 (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
+                 (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)])
+
     def __init__(self, 
                  data_root: str = None, 
                  pipeline: List[Union[dict, Callable]] = [], 
@@ -311,148 +325,148 @@ class CityscapesDatasetDetSeg(CocoDataset):
         data_info['instances'] = instances
         return data_info
 
-@DATASETS.register_module()
-class LostAndFoundDataset(BaseSegDataset):
+# @DATASETS.register_module()
+# class LostAndFoundDataset(BaseSegDataset):
 
-    METAINFO = dict(
-        classes=('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
-                 'traffic light', 'traffic sign', 'vegetation', 'terrain',
-                 'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
-                 'motorcycle', 'bicycle'),
-        palette=[(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
-                 (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
-                 (107, 142, 35), (152, 251, 152), (70, 130, 180),
-                 (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
-                 (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)])
+#     METAINFO = dict(
+#         classes=('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+#                  'traffic light', 'traffic sign', 'vegetation', 'terrain',
+#                  'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
+#                  'motorcycle', 'bicycle'),
+#         palette=[(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
+#                  (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
+#                  (107, 142, 35), (152, 251, 152), (70, 130, 180),
+#                  (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
+#                  (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)])
     
-    def __init__(self,
-                 img_suffix='_leftImg8bit.png',
-                 seg_map_suffix='_gtCoarse_labelTrainIds.png', 
-                 caption_prompt = None,
-                 return_classes = False,
-                 sequences_split_num = 10,
-                 use_sequence_group_flag = True,
-                 **kwargs) -> None:
-        self.caption_prompt = caption_prompt
-        self.return_classes = return_classes
-        self.sequences_split_num = sequences_split_num
-        self.use_sequence_group_flag = use_sequence_group_flag
-        super().__init__(
-            img_suffix=img_suffix, seg_map_suffix=seg_map_suffix, **kwargs)
+#     def __init__(self,
+#                  img_suffix='_leftImg8bit.png',
+#                  seg_map_suffix='_gtCoarse_labelTrainIds.png', 
+#                  caption_prompt = None,
+#                  return_classes = False,
+#                  sequences_split_num = 10,
+#                  use_sequence_group_flag = True,
+#                  **kwargs) -> None:
+#         self.caption_prompt = caption_prompt
+#         self.return_classes = return_classes
+#         self.sequences_split_num = sequences_split_num
+#         self.use_sequence_group_flag = use_sequence_group_flag
+#         super().__init__(
+#             img_suffix=img_suffix, seg_map_suffix=seg_map_suffix, **kwargs)
         
             
-    @force_full_init
-    def get_data_info(self, idx: int) -> dict:
-        """Get annotation by index and automatically call ``full_init`` if the
-        dataset has not been fully initialized.
+#     @force_full_init
+#     def get_data_info(self, idx: int) -> dict:
+#         """Get annotation by index and automatically call ``full_init`` if the
+#         dataset has not been fully initialized.
 
-        Args:
-            idx (int): The index of data.
+#         Args:
+#             idx (int): The index of data.
 
-        Returns:
-            dict: The idx-th annotation of the dataset.
-        """
-        if self.serialize_data:
-            start_addr = 0 if idx == 0 else self.data_address[idx - 1].item()
-            end_addr = self.data_address[idx].item()
-            bytes = memoryview(
-                self.data_bytes[start_addr:end_addr])  # type: ignore
-            data_info = pickle.loads(bytes)  # type: ignore
-        else:
-            data_info = copy.deepcopy(self.data_list[idx])
-        # Some codebase needs `sample_idx` of data information. Here we convert
-        # the idx to a positive number and save it in data information.
-        if idx >= 0:
-            data_info['sample_idx'] = idx
-        else:
-            data_info['sample_idx'] = len(self) + idx
+#         Returns:
+#             dict: The idx-th annotation of the dataset.
+#         """
+#         if self.serialize_data:
+#             start_addr = 0 if idx == 0 else self.data_address[idx - 1].item()
+#             end_addr = self.data_address[idx].item()
+#             bytes = memoryview(
+#                 self.data_bytes[start_addr:end_addr])  # type: ignore
+#             data_info = pickle.loads(bytes)  # type: ignore
+#         else:
+#             data_info = copy.deepcopy(self.data_list[idx])
+#         # Some codebase needs `sample_idx` of data information. Here we convert
+#         # the idx to a positive number and save it in data information.
+#         if idx >= 0:
+#             data_info['sample_idx'] = idx
+#         else:
+#             data_info['sample_idx'] = len(self) + idx
         
-        if self.return_classes:
-            data_info['text'] = self.metainfo['classes']
-            data_info['caption_prompt'] = self.caption_prompt
-            data_info['custom_entities'] = True
-        data_info['img_id'] = idx
+#         if self.return_classes:
+#             data_info['text'] = self.metainfo['classes']
+#             data_info['caption_prompt'] = self.caption_prompt
+#             data_info['custom_entities'] = True
+#         data_info['img_id'] = idx
 
-        return data_info
+#         return data_info
     
-    def _set_sequence_group_flag(self):
-        """
-        Set each sequence to be a different group
-        """
-        res = []
+#     def _set_sequence_group_flag(self):
+#         """
+#         Set each sequence to be a different group
+#         """
+#         res = []
 
-        curr_sequence = 0
+#         curr_sequence = 0
         
-        for idx in range(len(self.data_list)):
-            if idx != 0 and self.data_list[idx]['video_id'] != self.data_list[idx - 1]['video_id']:
-                # Not first frame and # of sweeps is 0 -> new sequence
-                curr_sequence += 1
-            res.append(curr_sequence)
+#         for idx in range(len(self.data_list)):
+#             if idx != 0 and self.data_list[idx]['video_id'] != self.data_list[idx - 1]['video_id']:
+#                 # Not first frame and # of sweeps is 0 -> new sequence
+#                 curr_sequence += 1
+#             res.append(curr_sequence)
 
-        self.flag = np.array(res, dtype=np.int64)
+#         self.flag = np.array(res, dtype=np.int64)
         
-        if self.sequences_split_num != 1:
-            if self.sequences_split_num == 'all':
-                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
-            else:
-                bin_counts = np.bincount(self.flag)
-                new_flags = []
-                curr_new_flag = 0
-                for curr_flag in range(len(bin_counts)):
-                    curr_sequence_length = np.array(
-                        list(range(0, 
-                                bin_counts[curr_flag], 
-                                math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
-                        + [bin_counts[curr_flag]])
+#         if self.sequences_split_num != 1:
+#             if self.sequences_split_num == 'all':
+#                 self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
+#             else:
+#                 bin_counts = np.bincount(self.flag)
+#                 new_flags = []
+#                 curr_new_flag = 0
+#                 for curr_flag in range(len(bin_counts)):
+#                     curr_sequence_length = np.array(
+#                         list(range(0, 
+#                                 bin_counts[curr_flag], 
+#                                 math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
+#                         + [bin_counts[curr_flag]])
 
-                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
-                        for _ in range(sub_seq_idx):
-                            new_flags.append(curr_new_flag)
-                        curr_new_flag += 1
+#                     for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+#                         for _ in range(sub_seq_idx):
+#                             new_flags.append(curr_new_flag)
+#                         curr_new_flag += 1
                 
-                assert len(new_flags) == len(self.flag)
-                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
-                self.flag = np.array(new_flags, dtype=np.int64)
+#                 assert len(new_flags) == len(self.flag)
+#                 assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
+#                 self.flag = np.array(new_flags, dtype=np.int64)
     
-    def full_init(self):
-        """Load annotation file and set ``BaseDataset._fully_initialized`` to
-        True.
+#     def full_init(self):
+#         """Load annotation file and set ``BaseDataset._fully_initialized`` to
+#         True.
 
-        If ``lazy_init=False``, ``full_init`` will be called during the
-        instantiation and ``self._fully_initialized`` will be set to True. If
-        ``obj._fully_initialized=False``, the class method decorated by
-        ``force_full_init`` will call ``full_init`` automatically.
+#         If ``lazy_init=False``, ``full_init`` will be called during the
+#         instantiation and ``self._fully_initialized`` will be set to True. If
+#         ``obj._fully_initialized=False``, the class method decorated by
+#         ``force_full_init`` will call ``full_init`` automatically.
 
-        Several steps to initialize annotation:
+#         Several steps to initialize annotation:
 
-            - load_data_list: Load annotations from annotation file.
-            - filter data information: Filter annotations according to
-              filter_cfg.
-            - slice_data: Slice dataset according to ``self._indices``
-            - serialize_data: Serialize ``self.data_list`` if
-              ``self.serialize_data`` is True.
-        """
-        if self._fully_initialized:
-            return
-        # load data information
-        self.data_list = self.load_data_list()
-        # filter illegal data, such as data that has no annotations.
-        self.data_list = self.filter_data()
-        # Get subset data according to indices.
-        if self._indices is not None:
-            self.data_list = self._get_unserialized_subset(self._indices)
+#             - load_data_list: Load annotations from annotation file.
+#             - filter data information: Filter annotations according to
+#               filter_cfg.
+#             - slice_data: Slice dataset according to ``self._indices``
+#             - serialize_data: Serialize ``self.data_list`` if
+#               ``self.serialize_data`` is True.
+#         """
+#         if self._fully_initialized:
+#             return
+#         # load data information
+#         self.data_list = self.load_data_list()
+#         # filter illegal data, such as data that has no annotations.
+#         self.data_list = self.filter_data()
+#         # Get subset data according to indices.
+#         if self._indices is not None:
+#             self.data_list = self._get_unserialized_subset(self._indices)
 
         
-        for data_info in self.data_list:
-            data_info['video_id'] = data_info['img_path'].split('/')[-1].split('_')[0]
-        if self.use_sequence_group_flag:
-            self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
+#         for data_info in self.data_list:
+#             data_info['video_id'] = data_info['img_path'].split('/')[-1].split('_')[0]
+#         if self.use_sequence_group_flag:
+#             self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
         
-        # serialize data_list
-        if self.serialize_data:
-            self.data_bytes, self.data_address = self._serialize_data()
+#         # serialize data_list
+#         if self.serialize_data:
+#             self.data_bytes, self.data_address = self._serialize_data()
 
-        self._fully_initialized = True
+#         self._fully_initialized = True
 
 
 class CocoSemSeg(Dataset):
@@ -701,9 +715,137 @@ class UnifyGT(BaseTransform):
         super().__init__()
         self.label_map = label_map
     
-    def transform(self, results: dict) -> dict:        
+    def transform(self, results: dict) -> dict:
         new_gt_seg_map = np.zeros_like(results['gt_seg_map'])
         for k, v in self.label_map.items():
             new_gt_seg_map[results['gt_seg_map'] == k] = v
         results['gt_seg_map'] = new_gt_seg_map
         return results
+
+
+
+@DATASETS.register_module()
+class SMIYCDataset(BaseDataset):
+    METAINFO = dict(
+        classes=('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+                 'traffic light', 'traffic sign', 'vegetation', 'terrain',
+                 'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
+                 'motorcycle', 'bicycle'),
+        palette=[(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
+                 (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
+                 (107, 142, 35), (152, 251, 152), (70, 130, 180),
+                 (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
+                 (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)])
+    # METAINFO = dict(
+    #     classes=('not anomaly', 'anomaly'),
+    #     palette=[[128, 64, 128], [244, 35, 232]])
+    def __init__(self,
+                 data_root: str = None, 
+                 data_info: str = None, 
+                 img_suffix: str = '.jpg', 
+                 split: str = 'validation',
+                 **kwargs) -> None:
+        super().__init__(lazy_init=True, serialize_data=False, data_root=data_root, **kwargs)
+        self.img_list = glob.glob(os.path.join(data_root, 'images', f'*{img_suffix}'))
+        if split == 'validation':
+            self.img_list = [img_path for img_path in self.img_list if 'validation' in img_path]
+        self.img_suffix = img_suffix
+
+    def full_init(self):
+        pass
+    
+    def __len__(self):
+        return len(self.img_list)
+    
+    def get_data_info(self, idx: int) -> dict:
+        data_info = dict()
+        if idx >= 0:
+            data_info['sample_idx'] = idx
+        else:
+            data_info['sample_idx'] = len(self) + idx
+        
+        data_info['img_path'] = self.img_list[idx]
+        data_info['reduce_zero_label'] = False
+        data_info['seg_map_path'] = self.img_list[idx].replace('images', 'labels_masks').replace(self.img_suffix, '_labels_semantic.png')
+        # if not os.path.exists(data_info['seg_map_path']):
+        # img = cv2.imread(data_info['img_path'])
+        # cv2.imwrite(data_info['seg_map_path'], np.zeros((*img.shape[:2], 1)))
+        data_info['text'] = self.metainfo['classes']
+        data_info['seg_fields'] = []
+
+        return data_info
+
+
+@TRANSFORMS.register_module()
+class GetAnomalyScoreMap(BaseTransform):
+    def __init__(self, data_path):
+        super().__init__()
+        self.data_path = data_path
+    
+    def transform(self, results: dict) -> dict:
+        anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])).replace('webp', 'jpg').replace('image_', '') + '.npy')
+        # anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])).replace('webp', 'jpg').replace('image_', '').replace('.png', '.npy').replace('_leftImg8bit', ''))
+        results['anomaly_score_map'] = anomaly_score_map
+        return results
+
+
+
+@DATASETS.register_module()
+class LostAndFoundDataset(BaseSegDataset):
+    """Cityscapes dataset.
+
+    The ``img_suffix`` is fixed to '_leftImg8bit.png' and ``seg_map_suffix`` is
+    fixed to '_gtFine_labelTrainIds.png' for Cityscapes dataset.
+    """
+    METAINFO = dict(
+        classes=('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+                 'traffic light', 'traffic sign', 'vegetation', 'terrain',
+                 'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
+                 'motorcycle', 'bicycle'),
+        palette=[[128, 64, 128], [244, 35, 232], [70, 70, 70], [102, 102, 156],
+                 [190, 153, 153], [153, 153, 153], [250, 170,
+                                                    30], [220, 220, 0],
+                 [107, 142, 35], [152, 251, 152], [70, 130, 180],
+                 [220, 20, 60], [255, 0, 0], [0, 0, 142], [0, 0, 70],
+                 [0, 60, 100], [0, 80, 100], [0, 0, 230], [119, 11, 32]])
+
+    def __init__(self,
+                 img_suffix='_leftImg8bit.png',
+                 seg_map_suffix='_gtCoarse_labelTrainIds.png',
+                 **kwargs) -> None:
+        super().__init__(
+            img_suffix=img_suffix, seg_map_suffix=seg_map_suffix, **kwargs)
+
+
+    @force_full_init
+    def get_data_info(self, idx: int) -> dict:
+        """Get annotation by index and automatically call ``full_init`` if the
+        dataset has not been fully initialized.
+
+        Args:
+            idx (int): The index of data.
+
+        Returns:
+            dict: The idx-th annotation of the dataset.
+        """
+        if self.serialize_data:
+            start_addr = 0 if idx == 0 else self.data_address[idx - 1].item()
+            end_addr = self.data_address[idx].item()
+            bytes = memoryview(
+                self.data_bytes[start_addr:end_addr])  # type: ignore
+            data_info = pickle.loads(bytes)  # type: ignore
+        else:
+            data_info = copy.deepcopy(self.data_list[idx])
+        # Some codebase needs `sample_idx` of data information. Here we convert
+        # the idx to a positive number and save it in data information.
+        if idx >= 0:
+            data_info['sample_idx'] = idx
+        else:
+            data_info['sample_idx'] = len(self) + idx
+        
+        data_info['text'] = self.metainfo['classes']
+        data_info['custom_entities'] = True
+        data_info['img_id'] = idx
+
+
+        return data_info
