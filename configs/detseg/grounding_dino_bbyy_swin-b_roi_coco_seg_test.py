@@ -32,7 +32,7 @@ data_preprocessor = dict(
 
 
 model = dict(
-    type='GroundingDINOPTSegMLP',
+    type='GroundingDINOPTSegRoI',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -111,7 +111,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHeadPTSegMLP',
+        type='GroundingDINOHeadPTSegRoI',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -120,21 +120,57 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=1.0),  # 2.0 in DeformDETR
-        loss_bbox=dict(type='L1Loss', loss_weight=5.0),
-        loss_mask=dict(
-            type='CrossEntropyLoss',
-            use_sigmoid=True,
-            reduction='mean',
-            loss_weight=5.0),
-        loss_dice=dict(
-            type='DiceLoss',
-            use_sigmoid=True,
-            activate=True,
-            reduction='mean',
-            naive_dice=True,
-            eps=1.0,
-            loss_weight=5.0)),
+            loss_weight=2.0),  # 2.0 in DeformDETR
+        loss_bbox=dict(type='L1Loss', loss_weight=1.0),
+        loss_iou=dict(type='GIoULoss', loss_weight=1.0),
+        mask_head=dict(type='MaskRCNNHead',
+                        mask_roi_extractor=dict(
+                            type='SingleRoIExtractor',
+                            roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=0),
+                            out_channels=256,
+                            featmap_strides=[4, 8, 16, 32]),
+                        mask_head=dict(
+                            type='FCNMaskHead',
+                            num_convs=4,
+                            in_channels=256,
+                            conv_out_channels=256,
+                            num_classes=1,
+                            loss_mask=dict(
+                                type='CrossEntropyLoss', use_mask=True, loss_weight=1.0),
+                        ),
+                        train_cfg=dict(
+                                        # assigner=dict(
+                                        #     type='HungarianAssigner',
+                                        #     match_costs=[
+                                        #         dict(type='FocalLossCost', weight=2.0),
+                                        #         dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
+                                        #         dict(type='IoUCost', iou_mode='giou', weight=2.0)
+                                        #     ]),
+                                        # sampler=dict(type='PseudoSampler'),
+                                        assigner=dict(
+                                            type='MaxIoUAssigner',
+                                            pos_iou_thr=0.5,
+                                            neg_iou_thr=0.5,
+                                            min_pos_iou=0.5,
+                                            match_low_quality=True,
+                                            ignore_iof_thr=-1),
+                                        sampler=dict(
+                                            type='RandomSampler',
+                                            num=512,
+                                            pos_fraction=0.25,
+                                            neg_pos_ub=-1,
+                                            add_gt_as_proposals=True),
+                                        mask_size=28,
+                                        pos_weight=-1,
+                                        debug=False
+                        ),
+                        test_cfg=dict(
+                                        score_thr=0.05,
+                                        nms=dict(type='nms', iou_threshold=0.5),
+                                        max_per_img=100,
+                                        mask_thr_binary=0.5)
+        )
+    ),
     dn_cfg=dict(  # TODO: Move to model.train_cfg ?
         label_noise_scale=0.5,
         box_noise_scale=1.0,  # 0.4 for DN-DETR
@@ -148,7 +184,8 @@ model = dict(
                 dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
-            ])),
+            ]),
+        ),
     test_cfg=dict(max_per_img=300),
     )
 
@@ -231,23 +268,21 @@ train_pipeline = [
 
 
 test_pipeline = [
-    dict(type='LoadImageFromFile'),
-    # dict(type='Resize', scale=(2048, 1024)),
     dict(
-        type='FixScaleResize',
-        scale=(800, 1333),
-        keep_ratio=True,
-        backend='pillow'),
-    dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    dict(type='UnifyGT', label_map={0: 0, 2: 1}),
-    dict(type='ConcatPrompt'),
-    # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RPL/score_results/lost_and_found'),
-    # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RbA/score_results/road_anomaly'),
-    dict(type='PackDetInputs', 
-         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'anomaly_score_map',
+        type='LoadImageFromFile',
+        to_float32=True,
+        backend_args={{_base_.backend_args}}),
+    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    # If you don't have a gt annotation, delete the pipeline
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+    dict(type='AddPrompt'),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
                    'custom_entities'))
 ]
+
 
 # dataset settings
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',

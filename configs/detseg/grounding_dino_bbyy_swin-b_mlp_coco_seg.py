@@ -112,6 +112,9 @@ model = dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
         type='GroundingDINOHeadPTSegMLP',
+        in_channels=[128, 256, 512, 1024],
+        feat_channels=256,
+        out_channels=256,
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -120,16 +123,14 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=0.2),  # 2.0 in DeformDETR
+            loss_weight=2.0),  # 2.0 in DeformDETR
         loss_bbox=dict(type='L1Loss', loss_weight=1.0),
         loss_iou=dict(type='GIoULoss', loss_weight=1.0),
         loss_mask=dict(
-            type='FocalLoss',
+            type='CrossEntropyLoss',
             use_sigmoid=True,
-            gamma=2.0,
-            alpha=0.25,
             reduction='mean',
-            loss_weight=20.0),
+            loss_weight=5.0),
         loss_dice=dict(
             type='DiceLoss',
             use_sigmoid=True,
@@ -137,7 +138,52 @@ model = dict(
             reduction='mean',
             naive_dice=True,
             eps=1.0,
-            loss_weight=1.0)),
+            loss_weight=5.0),
+        pixel_decoder=dict(
+            type='MSDeformAttnPixelDecoder',
+            num_outs=3,
+            norm_cfg=dict(type='GN', num_groups=32),
+            act_cfg=dict(type='ReLU'),
+            encoder=dict(  # DeformableDetrTransformerEncoder
+                num_layers=6,
+                layer_cfg=dict(  # DeformableDetrTransformerEncoderLayer
+                    self_attn_cfg=dict(  # MultiScaleDeformableAttention
+                        embed_dims=256,
+                        num_heads=8,
+                        num_levels=3,
+                        num_points=4,
+                        dropout=0.0,
+                        batch_first=True),
+                    ffn_cfg=dict(
+                        embed_dims=256,
+                        feedforward_channels=1024,
+                        num_fcs=2,
+                        ffn_drop=0.0,
+                        act_cfg=dict(type='ReLU', inplace=True)))),
+            positional_encoding=dict(num_feats=128, normalize=True)),
+        enforce_decoder_input_project=False,
+        positional_encoding=dict(num_feats=128, normalize=True),
+        transformer_decoder=dict(  # Mask2FormerTransformerDecoder
+            return_intermediate=True,
+            num_layers=6,
+            layer_cfg=dict(  # Mask2FormerTransformerDecoderLayer
+                self_attn_cfg=dict(  # MultiheadAttention
+                    embed_dims=256,
+                    num_heads=8,
+                    dropout=0.0,
+                    batch_first=True),
+                cross_attn_cfg=dict(  # MultiheadAttention
+                    embed_dims=256,
+                    num_heads=8,
+                    dropout=0.0,
+                    batch_first=True),
+                ffn_cfg=dict(
+                    embed_dims=256,
+                    feedforward_channels=2048,
+                    num_fcs=2,
+                    ffn_drop=0.0,
+                    act_cfg=dict(type='ReLU', inplace=True))),
+            init_cfg=None)),
     dn_cfg=dict(  # TODO: Move to model.train_cfg ?
         label_noise_scale=0.5,
         box_noise_scale=1.0,  # 0.4 for DN-DETR
@@ -150,9 +196,7 @@ model = dict(
             match_costs=[
                 dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
-                dict(type='IoUCost', iou_mode='giou', weight=2.0),
-                dict(type='FocalLossCost', weight=20.0, binary_input=True),
-                dict(type='DiceCost', weight=1.0, pred_act=True, eps=1.0)
+                dict(type='IoUCost', iou_mode='giou', weight=2.0)
             ])),
     test_cfg=dict(max_per_img=300),
     )
@@ -300,7 +344,7 @@ default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50, log_metric_by_epoch=False),
     param_scheduler=dict(type='ParamSchedulerHook'),
     checkpoint=dict(
-        type='CheckpointHook', by_epoch=False, interval=5000),
+        type='CheckpointHook', by_epoch=False, interval=5000, max_keep_ckpts=3),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='GroundingVisualizationHook', draw=False, interval=1, score_thr=0.0))
 
@@ -316,4 +360,4 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = '/home/arima/mmdetection/iter_5000.pth'
+load_from = 'ckpts/epoch_12.pth'

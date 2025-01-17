@@ -1,11 +1,11 @@
 from glob import glob
 import os
 
-# images = glob('data/FS_LostFound/images/*.png')
+images = glob('data/FS_LostFound/images/*.png')
 # images = glob('data/FS_Static/images/*.jpg')
 # images = glob('data/LostAndFound/leftImg8bit/train/01_Hanns_Klemm_Str_45/*.png')
 # images = glob('data/RoadAnomaly/frames/*.webp')
-images = glob('data/LostAndFound/leftImg8bit/test/02_Hanns_Klemm_Str_44/*.png')
+# images = glob('data/LostAndFound/leftImg8bit/test/02_Hanns_Klemm_Str_44/*.png')
 # images = ['data/FS_LostFound/images/3.png']
 
 # images = ['./data/LostAndFound/leftImg8bit/train/01_Hanns_Klemm_Str_45/01_Hanns_Klemm_Str_45_000001_000220_leftImg8bit.png']
@@ -55,8 +55,8 @@ for image in images[:]:
     
     os.system(f"python demo/image_demo.py \
                             {image} \
-                            configs/detseg/grounding_dino_bbyy_swin-b_detseg.py \
-                            --pred-score-thr 0.1 \
+                            configs/detseg/grounding_dino_bbyy_swin-b_sam_seg_test.py \
+                            --pred-score-thr 0.2 \
                             --weights iter_5000.pth \
                             --texts 'road. sidewalk. building. wall. fence. pole. traffic light. traffic sign. vegetation. terrain. sky. person. rider. car. truck. bus. train. motorcycle. bicycle'")
     

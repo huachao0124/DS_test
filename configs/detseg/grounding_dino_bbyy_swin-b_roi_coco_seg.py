@@ -32,7 +32,7 @@ data_preprocessor = dict(
 
 
 model = dict(
-    type='GroundingDINOPTSegMLP',
+    type='GroundingDINOPTSegRoI',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -111,7 +111,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHeadPTSegMLP',
+        type='GroundingDINOHeadPTSegRoI',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -120,21 +120,52 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=1.0),  # 2.0 in DeformDETR
-        loss_bbox=dict(type='L1Loss', loss_weight=5.0),
-        loss_mask=dict(
-            type='CrossEntropyLoss',
-            use_sigmoid=True,
-            reduction='mean',
-            loss_weight=5.0),
-        loss_dice=dict(
-            type='DiceLoss',
-            use_sigmoid=True,
-            activate=True,
-            reduction='mean',
-            naive_dice=True,
-            eps=1.0,
-            loss_weight=5.0)),
+            loss_weight=2.0),  # 2.0 in DeformDETR
+        loss_bbox=dict(type='L1Loss', loss_weight=1.0),
+        loss_iou=dict(type='GIoULoss', loss_weight=1.0),
+        mask_head=dict(type='MaskRCNNHead',
+                        mask_roi_extractor=dict(
+                            type='SingleRoIExtractor',
+                            roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=0),
+                            out_channels=256,
+                            featmap_strides=[4, 8, 16, 32]),
+                        mask_head=dict(
+                            type='FCNMaskHead',
+                            num_convs=4,
+                            in_channels=256,
+                            conv_out_channels=256,
+                            num_classes=1,
+                            loss_mask=dict(
+                                type='CrossEntropyLoss', use_mask=True, loss_weight=1.0),
+                        ),
+                        train_cfg=dict(
+                                        # assigner=dict(
+                                        #     type='HungarianAssigner',
+                                        #     match_costs=[
+                                        #         dict(type='FocalLossCost', weight=2.0),
+                                        #         dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
+                                        #         dict(type='IoUCost', iou_mode='giou', weight=2.0)
+                                        #     ]),
+                                        # sampler=dict(type='PseudoSampler'),
+                                        assigner=dict(
+                                            type='MaxIoUAssigner',
+                                            pos_iou_thr=0.5,
+                                            neg_iou_thr=0.5,
+                                            min_pos_iou=0.5,
+                                            match_low_quality=True,
+                                            ignore_iof_thr=-1),
+                                        sampler=dict(
+                                            type='RandomSampler',
+                                            num=512,
+                                            pos_fraction=0.25,
+                                            neg_pos_ub=-1,
+                                            add_gt_as_proposals=True),
+                                        mask_size=28,
+                                        pos_weight=-1,
+                                        debug=False
+                        )
+        )
+    ),
     dn_cfg=dict(  # TODO: Move to model.train_cfg ?
         label_noise_scale=0.5,
         box_noise_scale=1.0,  # 0.4 for DN-DETR
@@ -148,7 +179,8 @@ model = dict(
                 dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
-            ])),
+            ]),
+        ),
     test_cfg=dict(max_per_img=300),
     )
 
@@ -176,29 +208,21 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=0.01, norm_type=2))
 
 # learning policy
-max_iters = 368750
-param_scheduler = dict(
-    _delete_=True,
-    type='MultiStepLR',
-    begin=0,
-    end=max_iters,
-    by_epoch=False,
-    milestones=[327778, 355092],
-    gamma=0.1)
+# training schedule for 2x
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=24)
 
-# Before 365001th iteration, we do evaluation every 5000 iterations.
-# After 365000th iteration, we do evaluation every 368750 iterations,
-# which means that we do evaluation at the end of training.
-interval = 5000
-dynamic_intervals = [(max_iters // interval * interval + 1, max_iters)]
-train_cfg = dict(
-    _delete_=True,
-    type='IterBasedTrainLoop',
-    max_iters=max_iters,
-    val_interval=max_iters + 2,
-    dynamic_intervals=dynamic_intervals)
-val_cfg = dict(type='ValLoop')
-test_cfg = dict(type='TestLoop')
+# learning rate
+param_scheduler = [
+    dict(
+        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=500),
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=24,
+        by_epoch=True,
+        milestones=[16, 22],
+        gamma=0.1)
+]
 
 # dataset settings
 train_pipeline = [
@@ -231,23 +255,21 @@ train_pipeline = [
 
 
 test_pipeline = [
-    dict(type='LoadImageFromFile'),
-    # dict(type='Resize', scale=(2048, 1024)),
     dict(
-        type='FixScaleResize',
-        scale=(800, 1333),
-        keep_ratio=True,
-        backend='pillow'),
-    dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    dict(type='UnifyGT', label_map={0: 0, 2: 1}),
-    dict(type='ConcatPrompt'),
-    # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RPL/score_results/lost_and_found'),
-    # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RbA/score_results/road_anomaly'),
-    dict(type='PackDetInputs', 
-         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'anomaly_score_map',
+        type='LoadImageFromFile',
+        to_float32=True,
+        backend_args={{_base_.backend_args}}),
+    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    # If you don't have a gt annotation, delete the pipeline
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+    dict(type='AddPrompt'),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor', 'flip', 'flip_direction', 'text',
                    'custom_entities'))
 ]
+
 
 # dataset settings
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
@@ -263,62 +285,30 @@ palette = [(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
 metainfo = dict(classes=class_name, palette=palette)
 
 
-train_dataset_type = 'CityscapesWithCocoDataset'
-train_data_root = 'data/cityscapes/'
-test_dataset_type = 'RoadAnomalyDataset'
-test_data_root = 'data/RoadAnomaly'
-# test_dataset_type = 'FSLostAndFoundDataset'
-# test_data_root = 'data/FS_LostFound'
-# test_data_root = 'data/FS_Static'
-# test_dataset_type = 'SMIYCDataset'
-# test_data_root = 'data/SMIYC/dataset_AnomalyTrack'
-# test_dataset_type = 'LostAndFoundDataset'
-# test_data_root = 'data/LostAndFound'
+dataset_type = 'CocoDataset'
+data_root = 'data/coco/'
 
-
-class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
-            'traffic light', 'traffic sign', 'vegetation', 'terrain',
-            'sky', 'person', 'rider', 'car', 'truck', 'bus', 'train',
-            'motorcycle', 'bicycle')
-palette = [(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
-            (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
-            (107, 142, 35), (152, 251, 152), (70, 130, 180),
-            (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
-            (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)]
-
-metainfo = dict(classes=class_name, palette=palette)
-
-train_dataloader = dict(_delete_=True,
-                        batch_size=2,
-                        num_workers=2,
-                        # sampler=dict(type='DefaultSampler', shuffle=True),
-                        # batch_sampler=dict(type='AspectRatioBatchSampler'),
-                        sampler=dict(type='InfiniteSampler', shuffle=True),
-                        # batch_sampler=dict(type='InfiniteBatchSampler'),
-                        dataset=dict(type=train_dataset_type, 
-                                     coco_file_path='data/coco/',
-                                     data_root=train_data_root,
-                                     data_prefix=dict(
-                                        img_path='leftImg8bit/train', seg_map_path='gtFine/train'),
-                                     pipeline=train_pipeline))
-# val_dataloader = dict(dataset=dict(type=test_dataset_type,
-#                                      data_root=test_data_root,
-#                                      pipeline=test_pipeline))
-val_dataloader = dict(dataset=dict(_delete_=True,
-                                    type=test_dataset_type, 
-                                    data_root=test_data_root, 
-                                    pipeline=test_pipeline, 
-                                    # img_suffix='.webp',
-                                    # img_suffix='.jpg',
-                                    data_prefix=dict(
-                                        # img_path='images', seg_map_path='labels_masks'),))
-                                        # img_path='original', seg_map_path='labels'),))
-                                        img_path='leftImg8bit/test', seg_map_path='gtCoarse/test'),))
+train_dataloader = dict(
+    dataset=dict(
+        type=dataset_type,
+        ann_file='annotations/instances_train2017.json',
+        data_prefix=dict(img='train2017/'),
+        pipeline=train_pipeline))
+val_dataloader = dict(
+    dataset=dict(
+        type=dataset_type,
+        ann_file='annotations/instances_val2017.json',
+        data_prefix=dict(img='val2017/'),
+        pipeline=test_pipeline))
 test_dataloader = val_dataloader
-# val_evaluator = dict(type='AnomalyMetricRbA')
-val_evaluator = dict(type='BlankMetric')
-# val_evaluator = dict(type='AnomalyIoUMetric')
-# val_evaluator = dict(type='AnomalyMetricLoad')
+
+val_evaluator = dict(
+    _delete_=True,
+    type='CocoMetric',
+    ann_file=data_root + 'annotations/instances_val2017.json',
+    metric=['bbox', 'segm'],
+    format_only=False,
+    backend_args={{_base_.backend_args}})
 test_evaluator = val_evaluator
 
 # training schedule for 90k
@@ -326,12 +316,12 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
-    logger=dict(type='LoggerHook', interval=50, log_metric_by_epoch=False),
+    logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
     checkpoint=dict(
-        type='CheckpointHook', by_epoch=False, interval=5000),
+        type='CheckpointHook', by_epoch=True, interval=2),
     sampler_seed=dict(type='DistSamplerSeedHook'),
-    visualization=dict(type='GroundingVisualizationHook', draw=True, interval=5, score_thr=0.0))
+    visualization=dict(type='GroundingVisualizationHook', draw=False, interval=1, score_thr=0.0))
 
 vis_backends = [dict(type='LocalVisBackend')]
 # visualizer = dict(
@@ -345,4 +335,4 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = '/home/arima/mmdetection/iter_5000.pth'
+load_from = 'ckpts/epoch_12.pth'

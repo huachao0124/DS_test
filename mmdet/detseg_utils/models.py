@@ -12,10 +12,10 @@ from torch.nn import functional as F
 from mmengine.runner.amp import autocast
 from torch import Tensor
 
-from mmdet.registry import MODELS
+from mmdet.registry import MODELS, TASK_UTILS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType
-from mmdet.models.layers import SinePositionalEncoding
+from mmdet.models.layers import Mask2FormerTransformerDecoder, SinePositionalEncoding
 from mmdet.models.layers.transformer.grounding_dino_layers import (
     GroundingDinoTransformerDecoder, GroundingDinoTransformerDecoderLayer, GroundingDinoTransformerEncoder)
 from mmdet.models.layers.transformer.utils import coordinate_to_encoding
@@ -25,7 +25,7 @@ from mmdet.models.detectors.glip import (create_positive_map, create_positive_ma
                    run_ner)
 
 
-from mmcv.cnn import build_norm_layer, Linear, ConvModule
+from mmcv.cnn import build_norm_layer, Linear, ConvModule, Conv2d
 from mmcv.cnn.bricks.transformer import FFN, MultiheadAttention
 from mmcv.cnn.bricks import DropPath
 from mmcv.ops import MultiScaleDeformableAttention, batched_nms, point_sample
@@ -60,6 +60,9 @@ from PIL import Image
 
 from mmdet.models.utils import unpack_gt_instances, preprocess_panoptic_gt, get_uncertain_point_coords_with_randomness
 from contextlib import contextmanager
+from mmdet.models.dense_heads.atss_vlfusion_head import convert_grounding_to_cls_scores
+from mmdet.models.dense_heads.grounding_dino_head import ContrastiveEmbed
+from mmdet.models.task_modules.samplers import SamplingResult
 
 
 def clean_label_name(name: str) -> str:
@@ -4130,7 +4133,9 @@ class GroundingDINOPT(GroundingDINO):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        
+        self._freeze_modules()
+
+    def _freeze_modules(self):  
         for p in self.backbone.parameters():
             p.requires_grad_(False)
         for p in self.memory_trans_fc.parameters():
@@ -4208,7 +4213,6 @@ class GroundingDINOPT(GroundingDINO):
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         head_inputs_dict.update(decoder_outputs_dict)
         return head_inputs_dict
-    
 
     def pre_decoder(
         self,
@@ -5008,31 +5012,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
     def _get_targets_single(self, cls_score: Tensor, bbox_pred: Tensor,
                             gt_instances: InstanceData,
                             img_meta: dict) -> tuple:
-        """Compute regression and classification targets for one image.
-
-        Outputs from a single decoder layer of a single feature level are used.
-
-        Args:
-            cls_score (Tensor): Box score logits from a single decoder layer
-                for one image. Shape [num_queries, cls_out_channels].
-            bbox_pred (Tensor): Sigmoid outputs from a single decoder layer
-                for one image, with normalized coordinate (cx, cy, w, h) and
-                shape [num_queries, 4].
-            gt_instances (:obj:`InstanceData`): Ground truth of instance
-                annotations. It should includes ``bboxes`` and ``labels``
-                attributes.
-            img_meta (dict): Meta information for one image.
-
-        Returns:
-            tuple[Tensor]: a tuple containing the following for one image.
-
-            - labels (Tensor): Labels of each image.
-            - label_weights (Tensor]): Label weights of each image.
-            - bbox_targets (Tensor): BBox targets of each image.
-            - bbox_weights (Tensor): BBox weights of each image.
-            - pos_inds (Tensor): Sampled positive indices for each image.
-            - neg_inds (Tensor): Sampled negative indices for each image.
-        """
         img_h, img_w = img_meta['img_shape']
         factor = bbox_pred.new_tensor([img_w, img_h, img_w,
                                        img_h]).unsqueeze(0)
@@ -5271,14 +5250,14 @@ class GroundingDINOHeadPT(GroundingDINOHead):
 
             mask = (labels != 0) & (scores > thres)
 
-            scores[mask] *= 1.5
+            scores[mask] *= 1.2
             det_bboxes, keep = batched_nms(bboxes, scores, labels,  
                                                 nms_cfg=dict(iou_threshold=0.5), class_agnostic=True)
             results = InstanceData()
             results.bboxes = det_bboxes[:, :-1]
             results.scores = det_bboxes[:, -1]
             results.labels = labels[keep]
-            results.scores[mask[keep]] /= 1.5
+            results.scores[mask[keep]] /= 1.2
 
             result_list.append(results)
         return result_list
@@ -5655,22 +5634,195 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                 all_layers_denoising_bbox_preds)
 
 
+
 @MODELS.register_module()
-class GroundingDINOPTSegMLP(GroundingDINOPT):
+class GroundingDINOPTSegSAM(GroundingDINOPT):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
-        self.neck_mlp = ConvModule(
-                    128,
-                    256,
-                    3,
-                    padding=1,
-                    norm_cfg=dict(type='GN', num_groups=32),
-                    bias=True)
         
-        # self.sam = SamModel.from_pretrained("./sam-vit-base")
-        # self.processor = SamProcessor.from_pretrained("./sam-vit-base")
+        self.sam = SamModel.from_pretrained("./sam-vit-base")
+        self.processor = SamProcessor.from_pretrained("./sam-vit-base")
+    
 
+    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        visual_feats = self.extract_feat(batch_inputs)
+
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+
+        for data_sample, pred_instances, entity, is_rec_task in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.3) & (data_sample.pred_instances.labels == 0)]
+        
+        
+        # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+        #     masks = torch.zeros_like(input_img[:1])
+        #     ori_shape = data_sample.metainfo['ori_shape']
+        #     if len(data_sample.pred_instances) > 0:
+        #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+        #         masks = masks[0][:, 0].bool().float()
+        #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+        #     data_sample.set_data({
+        #         'pred_sem_seg':
+        #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+        #         # 'seg_logits':
+        #         # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+        #         'pred_masks':
+        #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+        #     })
+
+        return batch_data_samples
+
+
+    def sam_predict_hf(self, raw_image, boxes):
+        raw_image = Image.open(raw_image).convert("RGB")
+        inputs = self.processor(raw_image, return_tensors="pt").to(self.sam.device)
+        image_embeddings = self.sam.get_image_embeddings(inputs["pixel_values"])
+        inputs = self.processor(raw_image, input_boxes=[boxes.cpu().numpy().tolist()], return_tensors="pt").to(self.sam.device)
+        inputs.pop("pixel_values", None)
+        inputs.update({"image_embeddings": image_embeddings})
+        with torch.no_grad():
+            outputs = self.sam(**inputs)
+        masks = self.processor.image_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu())
+        return masks
+
+
+@MODELS.register_module()
+class GroundingDINOPTSegMLP(GroundingDINOPT):
+    def __init__(self,
+                **kwargs):
+        super().__init__(**kwargs)
+
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+        for p in self.query_embedding.parameters():
+            p.requires_grad_(True)
+        for p in self.query_embedding_bbyy.parameters():
+            p.requires_grad_(False)
+        for p in self.bbox_head.pixel_decoder.parameters():
+            p.requires_grad_(True)
+        for p in self.bbox_head.transformer_decoder.parameters():
+            p.requires_grad_(True)
+        for p in self.bbox_head.level_embed.parameters():
+            p.requires_grad_(True)
+        for p in self.bbox_head.mask_embed.parameters():
+            p.requires_grad_(True)
+        # for p in self.bbox_head.cls_branches.parameters():
+        #     p.requires_grad_(True)
+        # for p in self.bbox_head.cls_branches_bbyy.parameters():
+        #     p.requires_grad_(True)
+        # for p in self.bbox_head.reg_branches.parameters():
+        #     p.requires_grad_(True)
     
     
     def extract_feat(self, batch_inputs: Tensor) -> Tuple[Tensor]:
@@ -5678,9 +5830,32 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
         if self.with_neck:
             x_uc = self.neck(x[1:])
 
-        mask_feature = self.neck_mlp(x[0])
+        return x, x_uc
 
-        return mask_feature, x_uc
+
+    def forward_transformer(
+        self,
+        img_feats: Tuple[Tensor],
+        text_dict: Dict,
+        batch_data_samples: OptSampleList = None,
+    ) -> Dict:
+        # modify
+        text_dict['embedded'][:, 1:2] = text_dict['embedded'][:, 1:2] + self.bbyy_embedding.weight.unsqueeze(0)
+        
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+            img_feats, batch_data_samples)
+
+        encoder_outputs_dict = self.forward_encoder(
+            **encoder_inputs_dict, text_dict=text_dict)
+
+        tmp_dec_in, head_inputs_dict = self.pre_decoder(
+            **encoder_outputs_dict, batch_data_samples=batch_data_samples)
+        decoder_inputs_dict.update(tmp_dec_in)
+
+        decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
+        head_inputs_dict.update(decoder_outputs_dict)
+        head_inputs_dict['query_feat'] = decoder_inputs_dict['query']
+        return head_inputs_dict
 
 
     def loss(self, batch_inputs: Tensor,
@@ -5758,12 +5933,12 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
                     len(positive_map), 1)
         if self.use_autocast:
             with autocast(enabled=True):
-                mask_feature, visual_features = self.extract_feat(batch_inputs)
+                mask_features, visual_features = self.extract_feat(batch_inputs)
         else:
-            mask_feature, visual_features = self.extract_feat(batch_inputs)
+            mask_features, visual_features = self.extract_feat(batch_inputs)
         head_inputs_dict = self.forward_transformer(visual_features, text_dict,
                                                     batch_data_samples)
-        head_inputs_dict['memory_image'] = mask_feature
+        head_inputs_dict['mask_features'] = mask_features
         losses = self.bbox_head.loss(
             **head_inputs_dict, batch_data_samples=batch_data_samples)
         return losses
@@ -5809,13 +5984,13 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
             *_positive_maps_and_prompts)
 
         # image feature extraction
-        mask_feature, visual_feats = self.extract_feat(batch_inputs)
+        mask_features, visual_feats = self.extract_feat(batch_inputs)
         
         batch_img_metas = [data_sample.metainfo for data_sample in batch_data_samples]
         ori_shape = batch_img_metas[0]['ori_shape']
 
         # load anomaly score maps
-        anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
+        # anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
 
         if isinstance(text_prompts[0], list):
             # chunked text prompts, only bs=1 is supported
@@ -5839,7 +6014,7 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
 
                 head_inputs_dict = self.forward_transformer(
                     copy.deepcopy(visual_feats), text_dict, batch_data_samples)
-                head_inputs_dict['memory_image'] = mask_feature
+                head_inputs_dict['mask_features'] = mask_features
                 pred_instances = self.bbox_head.predict(
                     **head_inputs_dict,
                     rescale=rescale,
@@ -5869,14 +6044,14 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
 
             head_inputs_dict = self.forward_transformer(
                 visual_feats, text_dict, batch_data_samples)
-            head_inputs_dict['memory_image'] = mask_feature
+            head_inputs_dict['mask_features'] = mask_features
             results_list = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,
                 batch_data_samples=batch_data_samples)
 
-        for data_sample, pred_instances, entity, is_rec_task, anomaly_score, img_metas in zip(
-                batch_data_samples, results_list, entities, is_rec_tasks, anomaly_scores, batch_img_metas):
+        for data_sample, pred_instances, entity, is_rec_task, img_metas in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks, batch_img_metas):
             if len(pred_instances) > 0:
                 label_names = []
                 for labels in pred_instances.labels:
@@ -5944,7 +6119,12 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
 
                     panoptic_seg[mask] = pred_class
 
-            masks = F.interpolate(panoptic_seg.unsqueeze(1).unsqueeze(1).float(), ori_shape, mode='bilinear', align_corners=False)
+            # masks = F.interpolate(panoptic_seg.unsqueeze(1).unsqueeze(1).float(), ori_shape, mode='bilinear', align_corners=False)
+
+            # data_sample.pred_instances.masks = F.interpolate(panoptic_seg.unsqueeze(0).unsqueeze(0).float(), ori_shape, mode='bilinear', align_corners=False)
+            # data_sample.pred_instances.masks = F.interpolate(data_sample.pred_instances.masks.unsqueeze(1), ori_shape, mode='bilinear', align_corners=False).squeeze(1)
+
+
 
             # bboxes_anomaly = data_sample.pred_instances.bboxes.unsqueeze(1).unsqueeze(1)
             # objectness = torch.ones(ori_shape).to(batch_inputs.device) * 0.1
@@ -5956,14 +6136,14 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
             #     PixelData(**{'data': anomaly_score.squeeze(0)}),
             # })
 
-            data_sample.set_data({
-                # 'seg_logits':
-                # PixelData(**{'data': torch.stack((masks.squeeze(), 1-masks.squeeze()))}),
-                'pred_sem_seg':
-                PixelData(**{'sem_seg': masks.squeeze(1)}),
-                'pred_masks':
-                    PixelData(**{'sem_seg': masks.squeeze(1)}),
-            })
+            # data_sample.set_data({
+            #     # 'seg_logits':
+            #     # PixelData(**{'data': torch.stack((masks.squeeze(), 1-masks.squeeze()))}),
+            #     'pred_sem_seg':
+            #     PixelData(**{'sem_seg': masks.squeeze(1)}),
+            #     'pred_masks':
+            #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+            # })
 
         # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
         #     masks = torch.zeros_like(input_img[:1])
@@ -5989,30 +6169,101 @@ class GroundingDINOPTSegMLP(GroundingDINOPT):
         return batch_data_samples
 
 
-    def sam_predict_hf(self, raw_image, boxes):
-        raw_image = Image.open(raw_image).convert("RGB")
-        inputs = self.processor(raw_image, return_tensors="pt").to(self.sam.device)
-        image_embeddings = self.sam.get_image_embeddings(inputs["pixel_values"])
-        inputs = self.processor(raw_image, input_boxes=[boxes.cpu().numpy().tolist()], return_tensors="pt").to(self.sam.device)
-        inputs.pop("pixel_values", None)
-        inputs.update({"image_embeddings": image_embeddings})
-        with torch.no_grad():
-            outputs = self.sam(**inputs)
-        masks = self.processor.image_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu())
-        return masks
-
-
 @MODELS.register_module()
 class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
-    def __init__(self, loss_mask, loss_dice, **kwargs):
+    def __init__(self,
+                in_channels = [128, 256, 512, 1024],
+                feat_channels=256,
+                out_channels=256,
+                num_transformer_feat_level: int = 3,
+                pixel_decoder: ConfigType = ...,
+                enforce_decoder_input_project: bool = False,
+                transformer_decoder: ConfigType = ...,
+                positional_encoding: ConfigType = dict(
+                    num_feats=128, normalize=True),
+                loss_mask: ConfigType = ...,
+                loss_dice: ConfigType = ...,
+                **kwargs):
         super().__init__(**kwargs)
+
+
+        self.num_transformer_feat_level = num_transformer_feat_level
+        self.num_heads = transformer_decoder.layer_cfg.cross_attn_cfg.num_heads
+        self.num_transformer_decoder_layers = transformer_decoder.num_layers
+        assert pixel_decoder.encoder.layer_cfg. \
+            self_attn_cfg.num_levels == num_transformer_feat_level
+        pixel_decoder_ = copy.deepcopy(pixel_decoder)
+        pixel_decoder_.update(
+            in_channels=in_channels,
+            feat_channels=feat_channels,
+            out_channels=out_channels)
+        self.pixel_decoder = MODELS.build(pixel_decoder_)
+        self.transformer_decoder = Mask2FormerTransformerDecoder(
+            **transformer_decoder)
+        self.decoder_embed_dims = self.transformer_decoder.embed_dims
+        self.decoder_input_projs = ModuleList()
+        # from low resolution to high resolution
+        for _ in range(num_transformer_feat_level):
+            if (self.decoder_embed_dims != feat_channels
+                    or enforce_decoder_input_project):
+                self.decoder_input_projs.append(
+                    Conv2d(
+                        feat_channels, self.decoder_embed_dims, kernel_size=1))
+            else:
+                self.decoder_input_projs.append(nn.Identity())
+        self.decoder_positional_encoding = SinePositionalEncoding(
+            **positional_encoding)
+        # self.query_embed = nn.Embedding(self.num_queries, feat_channels)
+        # self.query_feat = nn.Embedding(self.num_queries, feat_channels)
+        # from low resolution to high resolution
+        self.level_embed = nn.Embedding(self.num_transformer_feat_level,
+                                        feat_channels)
+
         self.loss_mask = MODELS.build(loss_mask)
         self.loss_dice = MODELS.build(loss_dice)
 
+        self.assigner_bbox = TASK_UTILS.build(dict(
+                                    type='HungarianAssigner',
+                                    match_costs=[
+                                        dict(type='FocalLossCost', weight=2.0),
+                                        dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
+                                        dict(type='IoUCost', iou_mode='giou', weight=2.0)
+                                    ]))
+        
+        for m in self.decoder_input_projs:
+            if isinstance(m, Conv2d):
+                caffe2_xavier_init(m, bias=0)
+
+        self.pixel_decoder.init_weights()
+
+        for p in self.transformer_decoder.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_normal_(p)
+
+
     def _init_layers(self) -> None:
         """Initialize classification branch and regression branch of head."""
-        super()._init_layers()
-        self.cls_branches.requires_grad_(False)
+        fc_cls = ContrastiveEmbed(**self.contrastive_cfg)
+        reg_branch = []
+        for _ in range(self.num_reg_fcs):
+            reg_branch.append(Linear(self.embed_dims, self.embed_dims))
+            reg_branch.append(nn.ReLU())
+        reg_branch.append(Linear(self.embed_dims, 4))
+        reg_branch = nn.Sequential(*reg_branch)
+
+        # NOTE: due to the fc_cls is a contrastive embedding and don't
+        # have any trainable parameters,we do not need to copy it.
+        if self.share_pred_layer:
+            self.cls_branches = nn.ModuleList(
+                [fc_cls for _ in range(self.num_pred_layer)])
+            self.reg_branches = nn.ModuleList(
+                [reg_branch for _ in range(self.num_pred_layer)])
+        else:
+            self.cls_branches = nn.ModuleList(
+                [copy.deepcopy(fc_cls) for _ in range(self.num_pred_layer)])
+            self.reg_branches = nn.ModuleList([
+                copy.deepcopy(reg_branch) for _ in range(self.num_pred_layer)
+            ])
         # modify
         # ==================================================================
         fc_cls_bbyy = Linear(self.embed_dims, 1)
@@ -6023,8 +6274,6 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
         else:
             self.cls_branches_bbyy = nn.ModuleList(
                 [copy.deepcopy(fc_cls_bbyy) for _ in range(self.num_pred_layer)])
-
-        self.cls_branches_bbyy.requires_grad_(False)
 
         self.mask_embed = nn.Sequential(
             nn.Linear(self.embed_dims, self.embed_dims), nn.ReLU(inplace=True),
@@ -6039,11 +6288,33 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
         self.importance_sample_ratio = self.train_cfg.get(
             'importance_sample_ratio', 0.75)
 
+    def _forward_seg_head(self, decoder_out: Tensor, mask_feature: Tensor,
+                      attn_mask_target_size: Tuple[int, int]) -> Tuple[Tensor]:
+        decoder_out = self.transformer_decoder.post_norm(decoder_out)
+        # shape (num_queries, batch_size, c)
+        mask_embed = self.mask_embed(decoder_out)
+        # shape (num_queries, batch_size, h, w)
+        mask_pred = torch.einsum('bqc,bchw->bqhw', mask_embed, mask_feature)
+        attn_mask = F.interpolate(
+            mask_pred,
+            attn_mask_target_size,
+            mode='bilinear',
+            align_corners=False)
+        # shape (num_queries, batch_size, h, w) ->
+        #   (batch_size * num_head, num_queries, h, w)
+        attn_mask = attn_mask.flatten(2).unsqueeze(1).repeat(
+            (1, self.num_heads, 1, 1)).flatten(0, 1)
+        attn_mask = attn_mask.sigmoid() < 0.5
+        attn_mask = attn_mask.detach()
+
+        return mask_pred, attn_mask
+
     def forward(
         self,
+        x,
+        query_feat: Tensor,
         hidden_states: Tensor,
         references: List[Tensor],
-        memory_image: Tensor,
         memory_text: Tensor,
         text_token_mask: Tensor,
     ) -> Tuple[Tensor]:
@@ -6078,22 +6349,73 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
             all_layers_outputs_classes_bbyy.append(outputs_class_bbyy)
             all_layers_outputs_coords.append(outputs_coord)
 
-            mask_embed = self.mask_embed(hidden_state)
-            mask_pred = torch.einsum('bqc,bchw->bqhw', mask_embed, memory_image)
-            all_layers_outputs_masks.append(mask_pred)
-
         all_layers_outputs_classes = torch.stack(all_layers_outputs_classes)
         all_layers_outputs_classes_bbyy = torch.stack(all_layers_outputs_classes_bbyy)
         all_layers_outputs_coords = torch.stack(all_layers_outputs_coords)
-        all_layers_outputs_masks = torch.stack(all_layers_outputs_masks)
+
+        batch_size = x[0].shape[0]
+        mask_features, multi_scale_memorys = self.pixel_decoder(x)
+        # multi_scale_memorys (from low resolution to high resolution)
+        decoder_inputs = []
+        decoder_positional_encodings = []
+        for i in range(self.num_transformer_feat_level):
+            decoder_input = self.decoder_input_projs[i](multi_scale_memorys[i])
+            # shape (batch_size, c, h, w) -> (batch_size, h*w, c)
+            decoder_input = decoder_input.flatten(2).permute(0, 2, 1)
+            level_embed = self.level_embed.weight[i].view(1, 1, -1)
+            decoder_input = decoder_input + level_embed
+            # shape (batch_size, c, h, w) -> (batch_size, h*w, c)
+            mask = decoder_input.new_zeros(
+                (batch_size, ) + multi_scale_memorys[i].shape[-2:],
+                dtype=torch.bool)
+            decoder_positional_encoding = self.decoder_positional_encoding(
+                mask)
+            decoder_positional_encoding = decoder_positional_encoding.flatten(
+                2).permute(0, 2, 1)
+            decoder_inputs.append(decoder_input)
+            decoder_positional_encodings.append(decoder_positional_encoding)
+        # shape (num_queries, c) -> (batch_size, num_queries, c)
+        # query_embed = self.query_embed.weight.unsqueeze(0).repeat(
+        #     (batch_size, 1, 1))
+        query_embed = None
+
+        mask_pred_list = []
+        mask_pred, attn_mask = self._forward_seg_head(
+            query_feat, mask_features, multi_scale_memorys[0].shape[-2:])
+        mask_pred_list.append(mask_pred)
+
+        for i in range(self.num_transformer_decoder_layers):
+            level_idx = i % self.num_transformer_feat_level
+            # if a mask is all True(all background), then set it all False.
+            mask_sum = (attn_mask.sum(-1) != attn_mask.shape[-1]).unsqueeze(-1)
+            attn_mask = attn_mask & mask_sum
+            # cross_attn + self_attn
+            layer = self.transformer_decoder.layers[i]
+            query_feat = layer(
+                query=query_feat,
+                key=decoder_inputs[level_idx],
+                value=decoder_inputs[level_idx],
+                query_pos=query_embed,
+                key_pos=decoder_positional_encodings[level_idx],
+                cross_attn_mask=attn_mask,
+                query_key_padding_mask=None,
+                # here we do not apply masking on padded region
+                key_padding_mask=None)
+            mask_pred, attn_mask = self._forward_seg_head(
+                query_feat, mask_features, multi_scale_memorys[
+                    (i + 1) % self.num_transformer_feat_level].shape[-2:])
+            mask_pred_list.append(mask_pred)
+
+        all_layers_outputs_masks = torch.stack(mask_pred_list)
 
         return all_layers_outputs_classes, all_layers_outputs_classes_bbyy, all_layers_outputs_coords, all_layers_outputs_masks
 
 
     def predict(self,
+                mask_features,
+                query_feat: Tensor,
                 hidden_states: Tensor,
                 references: List[Tensor],
-                memory_image: Tensor,
                 memory_text: Tensor,
                 text_token_mask: Tensor,
                 batch_data_samples: SampleList,
@@ -6106,7 +6428,7 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
             for data_samples in batch_data_samples
         ]
 
-        outs = self(hidden_states, references, memory_image, memory_text, text_token_mask)
+        outs = self(mask_features, query_feat, hidden_states, references, memory_text, text_token_mask)
 
         predictions = self.predict_by_feat(
             *outs,
@@ -6127,22 +6449,33 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
         cls_scores_bbyy = all_layers_outputs_classes_bbyy[-1][:, -self.num_queries_bbyy:]
         bbox_preds = all_layers_bbox_preds[-1]
         mask_preds = all_layers_mask_preds[-1]
+
+        img_shape = batch_img_metas[0]['ori_shape']
+
         result_list = []
         for img_id in range(len(batch_img_metas)):
             cls_score = cls_scores[img_id]
             cls_score_bbyy = cls_scores_bbyy[img_id]
             bbox_pred = bbox_preds[img_id]
             mask_pred = mask_preds[img_id]
+
+            mask_pred = F.interpolate(
+                    mask_pred.unsqueeze(1),
+                    size=(img_shape[0], img_shape[1]),
+                    mode='bilinear',
+                    align_corners=False).squeeze(1)
+
             img_meta = batch_img_metas[img_id]
             token_positive_maps = batch_token_positive_maps[img_id]
-            results_id = self._predict_by_feat_single(cls_score, bbox_pred[:self.num_queries],
+            results_id = self._predict_by_feat_single(cls_score, bbox_pred[:self.num_queries], mask_pred[:self.num_queries],
                                                    token_positive_maps,
                                                    img_meta, rescale)
-            results_uni = self._predict_by_feat_single_bbyy(cls_score_bbyy, bbox_pred[-self.num_queries_bbyy:],
+            results_uni = self._predict_by_feat_single_bbyy(cls_score_bbyy, bbox_pred[-self.num_queries_bbyy:], mask_pred[-self.num_queries_bbyy:],
                                                    img_meta, rescale)
             bboxes = torch.cat((results_id.bboxes, results_uni.bboxes), dim=0)
             scores = torch.cat((results_id.scores, results_uni.scores), dim=0)
             labels = torch.cat((results_id.labels, results_uni.labels), dim=0)
+            masks = torch.cat((results_id.masks, results_uni.masks), dim=0)
 
             thres_dict = {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2, 6: 0.2, 7: 0.2, 8: 0.2, 9: 0.2, 10: 0.2, 
                           11: 0.2, 12: 0.5, 13: 0.5, 14: 0.5, 15: 0.5, 16: 0.5, 17: 0.5, 18: 0.5, 19: 0.5}
@@ -6151,25 +6484,86 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
             for lbl in range(1, 20):
                 thres[labels == lbl] = thres_dict[lbl]
 
-            mask = (labels != 0) & (scores > thres)
+            id_mask = (labels != 0) & (scores > thres)
 
-            scores[mask] *= 1.5
+            scores[id_mask] *= 1.5
             det_bboxes, keep = batched_nms(bboxes, scores, labels,  
                                                 nms_cfg=dict(iou_threshold=0.5), class_agnostic=True)
+
             results = InstanceData()
             results.bboxes = det_bboxes[:, :-1]
             results.scores = det_bboxes[:, -1]
             results.labels = labels[keep]
-            results.scores[mask[keep]] /= 1.5
-            results.masks = mask_pred[keep]
-            # results.masks = torch.einsum('bqc,bqhw->bchw', mask_embed, mask_pred[keep])
+            results.scores[id_mask[keep]] /= 1.5
+            results.masks = masks[keep]
 
             result_list.append(results)
+
         return result_list
+    
+
+    def _predict_by_feat_single(self,
+                                cls_score: Tensor,
+                                bbox_pred: Tensor,
+                                mask_pred: Tensor,
+                                token_positive_maps: dict,
+                                img_meta: dict,
+                                rescale: bool = True) -> InstanceData:
+        assert len(cls_score) == len(bbox_pred)  # num_queries
+        max_per_img = self.test_cfg.get('max_per_img', len(cls_score))
+        img_shape = img_meta['img_shape']
+
+        if token_positive_maps is not None:
+            cls_score = convert_grounding_to_cls_scores(
+                logits=cls_score.sigmoid()[None],
+                positive_maps=[token_positive_maps])[0]
+            scores, indexes = cls_score.view(-1).topk(max_per_img)
+            num_classes = cls_score.shape[-1]
+            det_labels = indexes % num_classes
+            bbox_index = indexes // num_classes
+            bbox_pred = bbox_pred[bbox_index]
+            mask_pred = mask_pred[bbox_index]
+        else:
+            cls_score = cls_score.sigmoid()
+            scores, _ = cls_score.max(-1)
+            scores, indexes = scores.topk(max_per_img)
+            bbox_pred = bbox_pred[indexes]
+            mask_pred = mask_pred[indexes]
+            det_labels = scores.new_zeros(scores.shape, dtype=torch.long)
+
+        det_bboxes = bbox_cxcywh_to_xyxy(bbox_pred)
+        det_bboxes[:, 0::2] = det_bboxes[:, 0::2] * img_shape[1]
+        det_bboxes[:, 1::2] = det_bboxes[:, 1::2] * img_shape[0]
+        det_bboxes[:, 0::2].clamp_(min=0, max=img_shape[1])
+        det_bboxes[:, 1::2].clamp_(min=0, max=img_shape[0])
+        if rescale:
+            assert img_meta.get('scale_factor') is not None
+            det_bboxes /= det_bboxes.new_tensor(
+                img_meta['scale_factor']).repeat((1, 2))
+
+        results = InstanceData()
+        results.bboxes = det_bboxes
+        results.scores = scores
+        results.labels = det_labels
+
+        # modify
+        # ==================================================================
+        mask_pred_binary = (mask_pred > 0).float()
+        mask_scores_per_image = (mask_pred.sigmoid() *
+                                 mask_pred_binary).flatten(1).sum(1) / (
+                                     mask_pred_binary.flatten(1).sum(1) + 1e-6)
+        det_scores = scores * mask_scores_per_image
+        mask_pred_binary = mask_pred_binary.bool()
+        results.masks = mask_pred_binary
+        # ==================================================================
+
+        return results
+
     
     def _predict_by_feat_single_bbyy(self,
                                 cls_score: Tensor,
                                 bbox_pred: Tensor,
+                                mask_pred: Tensor,
                                 img_meta: dict,
                                 rescale: bool = True) -> InstanceData:
         assert len(cls_score) == len(bbox_pred)  # num_queries
@@ -6204,11 +6598,22 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
         results.bboxes = det_bboxes
         results.scores = scores
         results.labels = det_labels
+
+        # modify
+        # ==================================================================
+        mask_pred_binary = (mask_pred > 0).float()
+        mask_scores_per_image = (mask_pred.sigmoid() *
+                                 mask_pred_binary).flatten(1).sum(1) / (
+                                     mask_pred_binary.flatten(1).sum(1) + 1e-6)
+        det_scores = scores * mask_scores_per_image
+        mask_pred_binary = mask_pred_binary.bool()
+        results.masks = mask_pred_binary
+        # ==================================================================
         
         return results
 
 
-    def loss(self, hidden_states: Tensor, references: List[Tensor], memory_image: Tensor,
+    def loss(self, mask_features, query_feat: Tensor, hidden_states: Tensor, references: List[Tensor],
              memory_text: Tensor, text_token_mask: Tensor,
              enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
              batch_data_samples: SampleList, dn_meta: Dict[str, int]) -> dict:
@@ -6231,7 +6636,7 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
                                                 batch_gt_semantic_segs)
 
         # forward
-        outs = self(hidden_states, references, memory_image, memory_text, text_token_mask)
+        outs = self(mask_features, query_feat, hidden_states, references, memory_text, text_token_mask)
         self.text_masks = text_token_mask
         loss_inputs = outs + (enc_outputs_class, enc_outputs_coord,
                               batch_gt_instances, batch_img_metas, dn_meta)
@@ -6312,7 +6717,7 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
             gt_masks_downsampled = gt_masks
         pred_instances = InstanceData(scores=cls_score, bboxes=bbox_pred, masks=mask_pred)
         downsampled_gt_instances = InstanceData(
-            labels=gt_labels, masks=gt_masks_downsampled)
+            labels=gt_labels, bboxes=gt_bboxes, masks=gt_masks_downsampled)
 
         # assigner and sampler
         assign_result = self.assigner.assign(
@@ -6413,13 +6818,16 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
     def use_parent_loss(self):
         _get_targets_single = self._get_targets_single
         loss_by_feat_single = self.loss_by_feat_single
+        assigner = self.assigner
         self._get_targets_single = self._get_targets_single_bbox
         self.loss_by_feat_single = self.loss_by_feat_single_bbox
+        self.assigner = self.assigner_bbox
         try:
             yield
         finally:
             self._get_targets_single = _get_targets_single
             self.loss_by_feat_single = loss_by_feat_single
+            self.assigner = assigner
     
 
     def loss_by_feat_single_bbox(self, cls_scores: Tensor, bbox_preds: Tensor,
@@ -6488,7 +6896,10 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
         return loss_cls, loss_bbox, loss_iou
 
 
-    def loss_by_feat(self, all_cls_scores: Tensor, all_cls_scores_bbyy: Tensor, all_bbox_preds: Tensor, all_mask_preds: Tensor,
+    def loss_by_feat(self, all_cls_scores: Tensor,
+                     all_cls_scores_bbyy: Tensor,
+                     all_bbox_preds: Tensor,
+                     all_mask_preds: Tensor,
                      enc_cls_scores: Tensor,
                      enc_bbox_preds: Tensor,
                      batch_gt_instances: InstanceList,
@@ -6522,26 +6933,25 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
 
         loss_dict = dict()
         # loss from the last decoder layer
-        loss_dict['loss_cls'] = losses_cls[-1]
-        loss_dict['loss_bbox'] = losses_bbox[-1]
-        loss_dict['loss_iou'] = losses_iou[-1]
+        # loss_dict['loss_cls'] = losses_cls[-1]
+        # loss_dict['loss_bbox'] = losses_bbox[-1]
+        # loss_dict['loss_iou'] = losses_iou[-1]
         loss_dict['loss_mask'] = losses_mask[-1]
         loss_dict['loss_dice'] = losses_dice[-1]
         # loss from other decoder layers
         num_dec_layer = 0
         for loss_cls_i, loss_bbox_i, loss_iou_i, loss_mask_i, loss_dice_i in zip(
                 losses_cls[:-1], losses_bbox[:-1], losses_iou[:-1], losses_mask[:-1], losses_dice[:-1]):
-            loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
-            loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
-            loss_dict[f'd{num_dec_layer}.loss_iou'] = loss_iou_i
+            # loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
+            # loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
+            # loss_dict[f'd{num_dec_layer}.loss_iou'] = loss_iou_i
             loss_dict[f'd{num_dec_layer}.loss_mask'] = loss_mask_i
             loss_dict[f'd{num_dec_layer}.loss_dice'] = loss_dice_i
             num_dec_layer += 1
         
         if enc_cls_scores is not None:
             # NOTE The enc_loss calculation of the DINO is
-            # different from that of Deformable DETR.
-            
+            # different from that of Deformable DETR. 
 
             with self.use_parent_loss():
                 enc_loss_cls, enc_losses_bbox, enc_losses_iou = \
@@ -6550,7 +6960,7 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
                         bbox_preds=enc_bbox_preds,
                         batch_gt_instances=batch_gt_instances,
                         batch_img_metas=batch_img_metas)
-                loss_dict['enc_loss_cls'] = enc_loss_cls
+                # loss_dict['enc_loss_cls'] = enc_loss_cls
                 loss_dict['enc_loss_bbox'] = enc_losses_bbox
                 loss_dict['enc_loss_iou'] = enc_losses_iou
 
@@ -6646,45 +7056,45 @@ class GroundingDINOHeadPTSegMLP(GroundingDINOHead):
             mode='bilinear',
             align_corners=False).squeeze(1)
         
-        # dice loss
-        loss_dice = self.loss_dice(
-            mask_preds, mask_targets, avg_factor=num_total_pos)
-
-        # mask loss
-        # FocalLoss support input of shape (n, num_class)
-        h, w = mask_preds.shape[-2:]
-        # shape (num_total_gts, h, w) -> (num_total_gts * h * w, 1)
-        mask_preds = mask_preds.reshape(-1, 1)
-        # shape (num_total_gts, h, w) -> (num_total_gts * h * w)
-        mask_targets = mask_targets.reshape(-1)
-        # target is (1 - mask_targets) !!!
-        loss_mask = self.loss_mask(
-            mask_preds, 1 - mask_targets, avg_factor=num_total_pos * h * w)
-        
-        # with torch.no_grad():
-        #     points_coords = get_uncertain_point_coords_with_randomness(
-        #         mask_preds.unsqueeze(1), None, self.num_points,
-        #         self.oversample_ratio, self.importance_sample_ratio)
-        #     # shape (num_total_gts, h, w) -> (num_total_gts, num_points)
-        #     mask_point_targets = point_sample(
-        #         mask_targets.unsqueeze(1).float(), points_coords).squeeze(1)
-        # # shape (num_queries, h, w) -> (num_queries, num_points)
-        # mask_point_preds = point_sample(
-        #     mask_preds.unsqueeze(1), points_coords).squeeze(1)
-
         # # dice loss
         # loss_dice = self.loss_dice(
-        #     mask_point_preds, mask_point_targets, avg_factor=num_total_pos)
+        #     mask_preds, mask_targets, avg_factor=num_total_pos)
 
         # # mask loss
-        # # shape (num_queries, num_points) -> (num_queries * num_points, )
-        # mask_point_preds = mask_point_preds.reshape(-1)
-        # # shape (num_total_gts, num_points) -> (num_total_gts * num_points, )
-        # mask_point_targets = mask_point_targets.reshape(-1)
+        # # FocalLoss support input of shape (n, num_class)
+        # h, w = mask_preds.shape[-2:]
+        # # shape (num_total_gts, h, w) -> (num_total_gts * h * w, 1)
+        # mask_preds = mask_preds.reshape(-1, 1)
+        # # shape (num_total_gts, h, w) -> (num_total_gts * h * w)
+        # mask_targets = mask_targets.reshape(-1)
+        # # target is (1 - mask_targets) !!!
         # loss_mask = self.loss_mask(
-        #     mask_point_preds,
-        #     mask_point_targets,
-        #     avg_factor=num_total_pos * self.num_points)        
+        #     mask_preds, 1 - mask_targets, avg_factor=num_total_pos * h * w)
+        
+        with torch.no_grad():
+            points_coords = get_uncertain_point_coords_with_randomness(
+                mask_preds.unsqueeze(1), None, self.num_points,
+                self.oversample_ratio, self.importance_sample_ratio)
+            # shape (num_total_gts, h, w) -> (num_total_gts, num_points)
+            mask_point_targets = point_sample(
+                mask_targets.unsqueeze(1).float(), points_coords).squeeze(1)
+        # shape (num_queries, h, w) -> (num_queries, num_points)
+        mask_point_preds = point_sample(
+            mask_preds.unsqueeze(1), points_coords).squeeze(1)
+
+        # dice loss
+        loss_dice = self.loss_dice(
+            mask_point_preds, mask_point_targets, avg_factor=num_total_pos)
+
+        # mask loss
+        # shape (num_queries, num_points) -> (num_queries * num_points, )
+        mask_point_preds = mask_point_preds.reshape(-1)
+        # shape (num_total_gts, num_points) -> (num_total_gts * num_points, )
+        mask_point_targets = mask_point_targets.reshape(-1)
+        loss_mask = self.loss_mask(
+            mask_point_preds,
+            mask_point_targets,
+            avg_factor=num_total_pos * self.num_points)        
 
         return loss_cls, loss_bbox, loss_iou, loss_mask, loss_dice
 
@@ -6784,7 +7194,7 @@ class SimpleRoIHead(BaseModule):
 
 
 @MODELS.register_module()
-class MaskRCNNHead():
+class MaskRCNNHead(BaseModule):
     def __init__(self,
                  mask_roi_extractor: OptMultiConfig = None,
                  mask_head: OptMultiConfig = None,
@@ -6794,6 +7204,13 @@ class MaskRCNNHead():
         super().__init__(init_cfg=init_cfg)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+
+        self.bbox_assigner = None
+        self.bbox_sampler = None
+        if self.train_cfg:
+            self.bbox_assigner = TASK_UTILS.build(self.train_cfg.assigner)
+            self.bbox_sampler = TASK_UTILS.build(
+                self.train_cfg.sampler, default_args=dict(context=self))
 
         if mask_head is not None:
             self.init_mask_head(mask_roi_extractor, mask_head)
@@ -6835,7 +7252,7 @@ class MaskRCNNHead():
         proposals = [rpn_results.bboxes for rpn_results in rpn_results_list]
         rois = bbox2roi(proposals)
         # mask head
-        mask_rois = rois[:100]
+        # mask_rois = rois[:100]
         mask_results = self._mask_forward(x, mask_rois)
         return mask_results
 
@@ -6869,8 +7286,44 @@ class MaskRCNNHead():
         return mask_results
     
 
+    def mask_loss(self, x: Tuple[Tensor],
+                  sampling_results: List[SamplingResult],
+                  batch_gt_instances: InstanceList) -> dict:
+        """Perform forward propagation and loss calculation of the mask head on
+        the features of the upstream network.
+
+        Args:
+            x (tuple[Tensor]): Tuple of multi-level img features.
+            sampling_results (list["obj:`SamplingResult`]): Sampling results.
+            bbox_feats (Tensor): Extract bbox RoI features.
+            batch_gt_instances (list[:obj:`InstanceData`]): Batch of
+                gt_instance. It usually includes ``bboxes``, ``labels``, and
+                ``masks`` attributes.
+
+        Returns:
+            dict: Usually returns a dictionary with keys:
+
+                - `mask_preds` (Tensor): Mask prediction.
+                - `mask_feats` (Tensor): Extract mask RoI features.
+                - `mask_targets` (Tensor): Mask target of each positive\
+                    proposals in the image.
+                - `loss_mask` (dict): A dictionary of mask loss components.
+        """
+        pos_rois = bbox2roi([res.pos_priors for res in sampling_results])
+        mask_results = self._mask_forward(x, pos_rois)
+
+        mask_loss_and_target = self.mask_head.loss_and_target(
+            mask_preds=mask_results['mask_preds'],
+            sampling_results=sampling_results,
+            batch_gt_instances=batch_gt_instances,
+            rcnn_train_cfg=self.train_cfg)
+
+        mask_results.update(loss_mask=mask_loss_and_target['loss_mask'])
+        return mask_results
+
+
     def loss(self, x: Tuple[Tensor], rpn_results_list: InstanceList,
-             batch_data_samples: List[DetDataSample]) -> dict:
+             batch_gt_instances: List[DetDataSample], batch_img_metas) -> dict:
         """Perform forward propagation and loss calculation of the detection
         roi on the features of the upstream network.
 
@@ -6885,21 +7338,23 @@ class MaskRCNNHead():
         Returns:
             dict[str, Tensor]: A dictionary of loss components
         """
-        assert len(rpn_results_list) == len(batch_data_samples)
-        outputs = unpack_gt_instances(batch_data_samples)
-        batch_gt_instances, batch_gt_instances_ignore, _ = outputs
+        # assert len(rpn_results_list) == len(batch_data_samples)
+        # outputs = unpack_gt_instances(batch_data_samples)
+        # batch_gt_instances, batch_gt_instances_ignore, _ = outputs
+        assert len(rpn_results_list) == len(batch_img_metas)
 
         # assign gts and sample proposals
-        num_imgs = len(batch_data_samples)
+        num_imgs = len(batch_img_metas)
         sampling_results = []
         for i in range(num_imgs):
             # rename rpn_results.bboxes to rpn_results.priors
             rpn_results = rpn_results_list[i]
-            rpn_results.priors = rpn_results.pop('bboxes')
+            rpn_results.priors = rpn_results.bboxes
 
             assign_result = self.bbox_assigner.assign(
                 rpn_results, batch_gt_instances[i],
-                batch_gt_instances_ignore[i])
+                None)
+            
             sampling_result = self.bbox_sampler.sample(
                 assign_result,
                 rpn_results,
@@ -6909,16 +7364,729 @@ class MaskRCNNHead():
 
         losses = dict()
         # bbox head loss
-        if self.with_bbox:
-            bbox_results = self.bbox_loss(x, sampling_results)
-            losses.update(bbox_results['loss_bbox'])
+        # if self.with_bbox:
+        #     bbox_results = self.bbox_loss(x, sampling_results)
+        #     losses.update(bbox_results['loss_bbox'])
 
         # mask head forward and loss
-        if self.with_mask:
-            mask_results = self.mask_loss(x, sampling_results,
-                                          bbox_results['bbox_feats'],
-                                          batch_gt_instances)
+        # if self.with_mask:
+        if True:
+            mask_results = self.mask_loss(x, sampling_results, batch_gt_instances)
             losses.update(mask_results['loss_mask'])
 
         return losses
     
+
+    def predict_mask(self,
+                     x: Tuple[Tensor],
+                     batch_img_metas: List[dict],
+                     results_list: InstanceList,
+                     rescale: bool = False) -> InstanceList:
+        """Perform forward propagation of the mask head and predict detection
+        results on the features of the upstream network.
+
+        Args:
+            x (tuple[Tensor]): Feature maps of all scale level.
+            batch_img_metas (list[dict]): List of image information.
+            results_list (list[:obj:`InstanceData`]): Detection results of
+                each image.
+            rescale (bool): If True, return boxes in original image space.
+                Defaults to False.
+
+        Returns:
+            list[:obj:`InstanceData`]: Detection results of each image
+            after the post process.
+            Each item usually contains following keys.
+
+                - scores (Tensor): Classification scores, has a shape
+                  (num_instance, )
+                - labels (Tensor): Labels of bboxes, has a shape
+                  (num_instances, ).
+                - bboxes (Tensor): Has a shape (num_instances, 4),
+                  the last dimension 4 arrange as (x1, y1, x2, y2).
+                - masks (Tensor): Has a shape (num_instances, H, W).
+        """
+        # don't need to consider aug_test.
+        bboxes = [res.bboxes for res in results_list]
+        mask_rois = bbox2roi(bboxes)
+        if mask_rois.shape[0] == 0:
+            results_list = empty_instances(
+                batch_img_metas,
+                mask_rois.device,
+                task_type='mask',
+                instance_results=results_list,
+                mask_thr_binary=self.test_cfg.mask_thr_binary)
+            return results_list
+
+        mask_results = self._mask_forward(x, mask_rois)
+        mask_preds = mask_results['mask_preds']
+        # split batch mask prediction back to each image
+        num_mask_rois_per_img = [len(res) for res in results_list]
+        mask_preds = mask_preds.split(num_mask_rois_per_img, 0)
+
+        # TODO: Handle the case where rescale is false
+        results_list = self.mask_head.predict_by_feat(
+            mask_preds=mask_preds,
+            results_list=results_list,
+            batch_img_metas=batch_img_metas,
+            rcnn_test_cfg=self.test_cfg,
+            rescale=rescale)
+        return results_list
+
+
+@MODELS.register_module()
+class GroundingDINOHeadPTSegRoI(GroundingDINOHead):
+    def __init__(self, mask_head, **kwargs):
+        super().__init__(**kwargs)
+        self.mask_head = MODELS.build(mask_head)
+
+    
+    def _init_layers(self) -> None:
+        """Initialize classification branch and regression branch of head."""
+        super()._init_layers()
+        # modify
+        # ==================================================================
+        fc_cls_bbyy = Linear(self.embed_dims, 1)
+
+        if self.share_pred_layer:
+            self.cls_branches_bbyy = nn.ModuleList(
+                [fc_cls_bbyy for _ in range(self.num_pred_layer)])
+        else:
+            self.cls_branches_bbyy = nn.ModuleList(
+                [copy.deepcopy(fc_cls_bbyy) for _ in range(self.num_pred_layer)])
+        # ==================================================================
+
+
+    def _get_targets_single(self, cls_score: Tensor, bbox_pred: Tensor,
+                            gt_instances: InstanceData,
+                            img_meta: dict) -> tuple:
+        img_h, img_w = img_meta['img_shape']
+        factor = bbox_pred.new_tensor([img_w, img_h, img_w,
+                                       img_h]).unsqueeze(0)
+        num_bboxes = bbox_pred.size(0)
+        # convert bbox_pred from xywh, normalized to xyxy, unnormalized
+        bbox_pred = bbox_cxcywh_to_xyxy(bbox_pred)
+        bbox_pred = bbox_pred * factor
+
+        pred_instances = InstanceData(scores=cls_score, bboxes=bbox_pred)
+        # assigner and sampler
+        assign_result = self.assigner.assign(
+            pred_instances=pred_instances,
+            gt_instances=gt_instances,
+            img_meta=img_meta)
+
+        gt_bboxes = gt_instances.bboxes
+        gt_labels = gt_instances.labels
+        pos_inds = torch.nonzero(
+            assign_result.gt_inds > 0, as_tuple=False).squeeze(-1).unique()
+        neg_inds = torch.nonzero(
+            assign_result.gt_inds == 0, as_tuple=False).squeeze(-1).unique()
+        pos_assigned_gt_inds = assign_result.gt_inds[pos_inds] - 1
+        pos_gt_bboxes = gt_bboxes[pos_assigned_gt_inds.long(), :]
+
+        # modify
+        # ==================================================================
+        # label targets
+        labels = gt_bboxes.new_full((num_bboxes, ),
+                                    1,
+                                    dtype=torch.long)
+        labels[pos_inds] = gt_labels[pos_assigned_gt_inds]
+        label_weights = gt_bboxes.new_ones(num_bboxes)
+        # ==================================================================
+
+        # bbox targets
+        bbox_targets = torch.zeros_like(bbox_pred, dtype=gt_bboxes.dtype)
+        bbox_weights = torch.zeros_like(bbox_pred, dtype=gt_bboxes.dtype)
+        bbox_weights[pos_inds] = 1.0
+
+        # DETR regress the relative position of boxes (cxcywh) in the image.
+        # Thus the learning target should be normalized by the image size, also
+        # the box format should be converted from defaultly x1y1x2y2 to cxcywh.
+        pos_gt_bboxes_normalized = pos_gt_bboxes / factor
+        pos_gt_bboxes_targets = bbox_xyxy_to_cxcywh(pos_gt_bboxes_normalized)
+        bbox_targets[pos_inds] = pos_gt_bboxes_targets
+        return (labels, label_weights, bbox_targets, bbox_weights, pos_inds,
+                neg_inds)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        references: List[Tensor],
+        memory_text: Tensor,
+        text_token_mask: Tensor,
+    ) -> Tuple[Tensor]:
+        all_layers_outputs_classes = []
+        all_layers_outputs_classes_bbyy = []
+        all_layers_outputs_coords = []
+
+        for layer_id in range(hidden_states.shape[0]):
+            reference = inverse_sigmoid(references[layer_id])
+            # NOTE The last reference will not be used.
+            hidden_state = hidden_states[layer_id]
+            outputs_class = self.cls_branches[layer_id](hidden_state,
+                                                        memory_text,
+                                                        text_token_mask)
+            outputs_class_bbyy = self.cls_branches_bbyy[layer_id](hidden_state)
+            tmp_reg_preds = self.reg_branches[layer_id](hidden_state)
+            if reference.shape[-1] == 4:
+                # When `layer` is 0 and `as_two_stage` of the detector
+                # is `True`, or when `layer` is greater than 0 and
+                # `with_box_refine` of the detector is `True`.
+                tmp_reg_preds += reference
+            else:
+                # When `layer` is 0 and `as_two_stage` of the detector
+                # is `False`, or when `layer` is greater than 0 and
+                # `with_box_refine` of the detector is `False`.
+                assert reference.shape[-1] == 2
+                tmp_reg_preds[..., :2] += reference
+            outputs_coord = tmp_reg_preds.sigmoid()
+            all_layers_outputs_classes.append(outputs_class)
+            all_layers_outputs_classes_bbyy.append(outputs_class_bbyy)
+            all_layers_outputs_coords.append(outputs_coord)
+
+        all_layers_outputs_classes = torch.stack(all_layers_outputs_classes)
+        all_layers_outputs_classes_bbyy = torch.stack(all_layers_outputs_classes_bbyy)
+        all_layers_outputs_coords = torch.stack(all_layers_outputs_coords)
+
+        return all_layers_outputs_classes, all_layers_outputs_classes_bbyy, all_layers_outputs_coords
+
+    def predict(self,
+                mask_features: List[Tensor],
+                hidden_states: Tensor,
+                references: List[Tensor],
+                memory_text: Tensor,
+                text_token_mask: Tensor,
+                batch_data_samples: SampleList,
+                rescale: bool = True) -> InstanceList:
+
+        rescale = False       
+        batch_img_metas = [
+            data_samples.metainfo for data_samples in batch_data_samples
+        ]
+        batch_token_positive_maps = [
+            data_samples.token_positive_map
+            for data_samples in batch_data_samples
+        ]
+
+        outs = self(hidden_states, references, memory_text, text_token_mask)
+
+        predictions = self.predict_by_feat(
+            mask_features,
+            *outs,
+            batch_img_metas=batch_img_metas,
+            batch_token_positive_maps=batch_token_positive_maps,
+            rescale=rescale)
+        return predictions
+    
+    def predict_by_feat(self,
+                        mask_features: List[Tensor],
+                        all_layers_cls_scores: Tensor,
+                        all_layers_outputs_classes_bbyy: Tensor,
+                        all_layers_bbox_preds: Tensor,
+                        batch_img_metas: List[Dict],
+                        batch_token_positive_maps: Optional[List[dict]] = None,
+                        rescale: bool = False) -> InstanceList:
+        cls_scores = all_layers_cls_scores[-1][:, :self.num_queries]
+        cls_scores_bbyy = all_layers_outputs_classes_bbyy[-1][:, -self.num_queries_bbyy:]
+        bbox_preds = all_layers_bbox_preds[-1]
+        result_list = []
+        for img_id in range(len(batch_img_metas)):
+            cls_score = cls_scores[img_id]
+            cls_score_bbyy = cls_scores_bbyy[img_id]
+            bbox_pred = bbox_preds[img_id]
+            img_meta = batch_img_metas[img_id]
+            token_positive_maps = batch_token_positive_maps[img_id]
+            results_id = self._predict_by_feat_single(cls_score, bbox_pred[:self.num_queries],
+                                                   token_positive_maps,
+                                                   img_meta, rescale)
+            results_uni = self._predict_by_feat_single_bbyy(cls_score_bbyy, bbox_pred[-self.num_queries_bbyy:],
+                                                   img_meta, rescale)
+            bboxes = torch.cat((results_id.bboxes, results_uni.bboxes), dim=0)
+            scores = torch.cat((results_id.scores, results_uni.scores), dim=0)
+            labels = torch.cat((results_id.labels, results_uni.labels), dim=0)
+
+            thres_dict = {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2, 6: 0.2, 7: 0.2, 8: 0.2, 9: 0.2, 10: 0.2, 
+                          11: 0.2, 12: 0.5, 13: 0.5, 14: 0.5, 15: 0.5, 16: 0.5, 17: 0.5, 18: 0.5, 19: 0.5}
+            thres = labels.new_ones(labels.shape)
+
+            for lbl in range(1, 20):
+                thres[labels == lbl] = thres_dict[lbl]
+
+            mask = (labels != 0) & (scores > thres)
+
+            scores[mask] *= 1.5
+            det_bboxes, keep = batched_nms(bboxes, scores, labels,  
+                                                nms_cfg=dict(iou_threshold=0.5), class_agnostic=True)
+            results = InstanceData()
+            results.bboxes = det_bboxes[:, :-1]
+            results.scores = det_bboxes[:, -1]
+            results.labels = labels[keep]
+            results.scores[mask[keep]] /= 1.5
+
+            result_list.append(results)
+        
+        all_labels = []
+        for results in result_list:
+            all_labels.append(results.labels)
+            results.labels = torch.zeros_like(results.labels)
+
+        result_list = self.mask_head.predict_mask(mask_features, batch_img_metas, result_list, rescale=True)
+
+        for idx, results in enumerate(result_list):
+            results.labels = all_labels[idx]
+
+
+        return result_list
+    
+    def _predict_by_feat_single_bbyy(self,
+                                cls_score: Tensor,
+                                bbox_pred: Tensor,
+                                img_meta: dict,
+                                rescale: bool = True) -> InstanceData:
+        assert len(cls_score) == len(bbox_pred)  # num_queries
+        max_per_img = self.test_cfg.get('max_per_img', len(cls_score))
+        img_shape = img_meta['img_shape']
+        # exclude background
+        num_classes = 1
+        # if self.loss_cls.use_sigmoid:
+        if True:
+            cls_score = cls_score.sigmoid()
+            scores, indexes = cls_score.view(-1).topk(max_per_img)
+            det_labels = indexes % num_classes
+            bbox_index = indexes // num_classes
+            bbox_pred = bbox_pred[bbox_index]
+        else:
+            scores, det_labels = F.softmax(cls_score, dim=-1)[..., :-1].max(-1)
+            scores, bbox_index = scores.topk(max_per_img)
+            bbox_pred = bbox_pred[bbox_index]
+            det_labels = det_labels[bbox_index]
+
+        det_bboxes = bbox_cxcywh_to_xyxy(bbox_pred)
+        det_bboxes[:, 0::2] = det_bboxes[:, 0::2] * img_shape[1]
+        det_bboxes[:, 1::2] = det_bboxes[:, 1::2] * img_shape[0]
+        det_bboxes[:, 0::2].clamp_(min=0, max=img_shape[1])
+        det_bboxes[:, 1::2].clamp_(min=0, max=img_shape[0])
+        if rescale:
+            assert img_meta.get('scale_factor') is not None
+            det_bboxes /= det_bboxes.new_tensor(
+                img_meta['scale_factor']).repeat((1, 2))
+
+        results = InstanceData()
+        results.bboxes = det_bboxes
+        results.scores = scores
+        results.labels = det_labels
+        
+        return results
+
+    def loss(self, mask_features: List[Tensor], hidden_states: Tensor, references: List[Tensor],
+             memory_text: Tensor, text_token_mask: Tensor,
+             enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
+             batch_data_samples: SampleList, dn_meta: Dict[str, int]) -> dict:
+        batch_gt_instances = []
+        batch_img_metas = []
+
+        # modify: all gt labels are set to 0
+        # ==================================================================
+        for data_sample in batch_data_samples:
+            batch_img_metas.append(data_sample.metainfo)
+            gt_instances = data_sample.gt_instances
+            gt_instances.labels = torch.zeros_like(gt_instances.labels)
+            batch_gt_instances.append(gt_instances)
+        # ==================================================================
+
+        outs = self(hidden_states, references, memory_text, text_token_mask)
+        self.text_masks = text_token_mask
+        loss_inputs = (mask_features, ) + outs + (enc_outputs_class, enc_outputs_coord,
+                              batch_gt_instances, batch_img_metas, dn_meta)
+        losses = self.loss_by_feat(*loss_inputs)
+        return losses
+    
+    def loss_by_feat(
+        self,
+        mask_features: List[Tensor],
+        all_layers_cls_scores: Tensor,
+        all_layers_cls_scores_bbyy: Tensor, 
+        all_layers_bbox_preds: Tensor,
+        enc_cls_scores: Tensor,
+        enc_bbox_preds: Tensor,
+        batch_gt_instances: InstanceList,
+        batch_img_metas: List[dict],
+        dn_meta: Dict[str, int],
+        batch_gt_instances_ignore: OptInstanceList = None
+    ) -> Dict[str, Tensor]:
+        # extract denoising and matching part of outputs
+        (all_layers_matching_cls_scores, all_layers_matching_cls_scores_bbyy, all_layers_matching_bbox_preds,
+         all_layers_denoising_cls_scores, all_layers_denoising_cls_scores_bbyy, all_layers_denoising_bbox_preds) = \
+            self.split_outputs(
+                all_layers_cls_scores, all_layers_cls_scores_bbyy, all_layers_bbox_preds, dn_meta)
+
+        # modify
+        # ======================================================================
+        _, all_layers_matching_cls_scores_bbyy = torch.split(
+                                        all_layers_matching_cls_scores_bbyy, [self.num_queries, self.num_queries_bbyy], dim=2)
+        _, all_layers_matching_bbox_preds_bbyy = torch.split(
+                                        all_layers_matching_bbox_preds, [self.num_queries, self.num_queries_bbyy], dim=2)
+        # ======================================================================
+
+        num_dec_layers = len(all_layers_cls_scores)
+        batch_gt_instances_list = [
+            batch_gt_instances for _ in range(num_dec_layers)
+        ]
+        img_metas_list = [batch_img_metas for _ in range(num_dec_layers)]
+        mask_features_list = [mask_features for _ in range(num_dec_layers)]
+
+        losses_mask, _ = multi_apply(
+                        self.loss_by_feat_single,
+                        mask_features_list,
+                        all_layers_matching_cls_scores_bbyy,
+                        all_layers_matching_bbox_preds_bbyy,
+                        batch_gt_instances_list,
+                        img_metas_list)
+
+        loss_dict = dict()
+        # loss from the last decoder layer
+        loss_dict['loss_mask'] = losses_mask[-1]
+        # loss from other decoder layers
+        num_dec_layer = 0
+
+        for loss_mask_i in losses_mask[:-1]:
+            loss_dict[f'd{num_dec_layer}.loss_mask'] = loss_mask_i
+            num_dec_layer += 1
+        
+        # loss of proposal generated from encode feature map.
+        if enc_cls_scores is not None:
+            # NOTE The enc_loss calculation of the DINO is
+            # different from that of Deformable DETR.
+            enc_loss_mask, _ = \
+                self.loss_by_feat_single(
+                    mask_features,
+                    enc_cls_scores, enc_bbox_preds,
+                    batch_gt_instances=batch_gt_instances,
+                    batch_img_metas=batch_img_metas)
+            loss_dict['enc_loss_mask'] = enc_loss_mask
+        return loss_dict    
+    
+    def loss_by_feat_single(self, mask_features: List[Tensor], cls_scores: Tensor, bbox_preds: Tensor,
+                            batch_gt_instances: InstanceList,
+                            batch_img_metas: List[dict]) -> Tuple[Tensor]:
+        
+        num_imgs = cls_scores.size(0)
+        cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
+        bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
+
+        rpn_results_list = []
+        for img_id in range(num_imgs):
+            img_meta = batch_img_metas[img_id]
+            scores = cls_scores_list[img_id]
+
+            bboxes = bbox_preds_list[img_id]
+            img_shape = img_meta['img_shape']
+            bboxes = bbox_cxcywh_to_xyxy(bboxes)
+            bboxes[:, 0::2] = bboxes[:, 0::2] * img_shape[1]
+            bboxes[:, 1::2] = bboxes[:, 1::2] * img_shape[0]
+            bboxes[:, 0::2].clamp_(min=0, max=img_shape[1])
+            bboxes[:, 1::2].clamp_(min=0, max=img_shape[0])
+            
+            results = InstanceData()
+            results.bboxes = bboxes
+            results.scores = scores
+            rpn_results_list.append(results)
+
+        loss_mask = self.mask_head.loss(mask_features, rpn_results_list, batch_gt_instances, batch_img_metas)['loss_mask']
+        return loss_mask, None
+        
+    @staticmethod
+    def split_outputs(all_layers_cls_scores: Tensor,
+                      all_layers_cls_scores_bbyy: Tensor,
+                      all_layers_bbox_preds: Tensor,
+                      dn_meta: Dict[str, int]) -> Tuple[Tensor]:
+        num_denoising_queries = dn_meta['num_denoising_queries']
+        if dn_meta is not None:
+            all_layers_denoising_cls_scores = \
+                all_layers_cls_scores[:, :, : num_denoising_queries, :]
+            all_layers_denoising_cls_scores_bbyy = \
+                all_layers_cls_scores_bbyy[:, :, : num_denoising_queries, :]
+            all_layers_denoising_bbox_preds = \
+                all_layers_bbox_preds[:, :, : num_denoising_queries, :]
+            all_layers_matching_cls_scores = \
+                all_layers_cls_scores[:, :, num_denoising_queries:, :]
+            all_layers_matching_cls_scores_bbyy = \
+                all_layers_cls_scores_bbyy[:, :, num_denoising_queries:, :]
+            all_layers_matching_bbox_preds = \
+                all_layers_bbox_preds[:, :, num_denoising_queries:, :]
+        else:
+            all_layers_denoising_cls_scores = None
+            all_layers_denoising_cls_scores_bbyy = None
+            all_layers_denoising_bbox_preds = None
+            all_layers_matching_cls_scores = all_layers_cls_scores
+            all_layers_matching_cls_scores_bbyy = all_layers_cls_scores_bbyy
+            all_layers_matching_bbox_preds = all_layers_bbox_preds
+        return (all_layers_matching_cls_scores, all_layers_matching_cls_scores_bbyy, 
+                all_layers_matching_bbox_preds,
+                all_layers_denoising_cls_scores,all_layers_denoising_cls_scores_bbyy, 
+                all_layers_denoising_bbox_preds)
+
+
+@MODELS.register_module()
+class GroundingDINOPTSegRoI(GroundingDINOPT):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        for p in self.parameters():
+            p.requires_grad_(False)
+        
+        self.neck_mask = MODELS.build(dict(
+                                        type='FPN',
+                                        in_channels=[128, 256, 512, 1024],
+                                        out_channels=256,
+                                        num_outs=5))
+        
+        for p in self.bbox_head.mask_head.parameters():
+            p.requires_grad_(True)
+        
+        for p in self.neck_mask.parameters():
+            p.requires_grad_(True)
+        
+        # self.sam = SamModel.from_pretrained("./sam-vit-base")
+        # self.processor = SamProcessor.from_pretrained("./sam-vit-base")
+    
+    
+    def extract_feat(self, batch_inputs: Tensor) -> Tuple[Tensor]:
+        x = self.backbone(batch_inputs) # [4, 8, 16, 32]
+        if self.with_neck:
+            x_uc = self.neck(x[1:])
+        x_mask = self.neck_mask(x)
+
+        return x_mask, x_uc
+
+
+    def loss(self, batch_inputs: Tensor,
+             batch_data_samples: SampleList) -> Union[dict, list]:
+        text_prompts = [
+            data_samples.text for data_samples in batch_data_samples
+        ]
+
+        gt_labels = [
+            data_samples.gt_instances.labels
+            for data_samples in batch_data_samples
+        ]
+
+        if 'tokens_positive' in batch_data_samples[0]:
+            tokens_positive = [
+                data_samples.tokens_positive
+                for data_samples in batch_data_samples
+            ]
+            positive_maps = []
+            for token_positive, text_prompt, gt_label in zip(
+                    tokens_positive, text_prompts, gt_labels):
+                tokenized = self.language_model.tokenizer(
+                    [text_prompt],
+                    padding='max_length'
+                    if self.language_model.pad_to_max else 'longest',
+                    return_tensors='pt')
+                new_tokens_positive = [
+                    token_positive[label.item()] for label in gt_label
+                ]
+                _, positive_map = self.get_positive_map(
+                    tokenized, new_tokens_positive)
+                positive_maps.append(positive_map)
+            new_text_prompts = text_prompts
+        else:
+            new_text_prompts = []
+            positive_maps = []
+            if len(set(text_prompts)) == 1:
+                # All the text prompts are the same,
+                # so there is no need to calculate them multiple times.
+                tokenized, caption_string, tokens_positive, _ = \
+                    self.get_tokens_and_prompts(
+                        text_prompts[0], True)
+                new_text_prompts = [caption_string] * len(batch_inputs)
+                for gt_label in gt_labels:
+                    new_tokens_positive = [
+                        tokens_positive[label] for label in gt_label
+                    ]
+                    _, positive_map = self.get_positive_map(
+                        tokenized, new_tokens_positive)
+                    positive_maps.append(positive_map)
+            else:
+                for text_prompt, gt_label in zip(text_prompts, gt_labels):
+                    tokenized, caption_string, tokens_positive, _ = \
+                        self.get_tokens_and_prompts(
+                            text_prompt, True)
+                    new_tokens_positive = [
+                        tokens_positive[label] for label in gt_label
+                    ]
+                    _, positive_map = self.get_positive_map(
+                        tokenized, new_tokens_positive)
+                    positive_maps.append(positive_map)
+                    new_text_prompts.append(caption_string)
+
+        text_dict = self.language_model(new_text_prompts)
+        if self.text_feat_map is not None:
+            text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
+
+        for i, data_samples in enumerate(batch_data_samples):
+            positive_map = positive_maps[i].to(
+                batch_inputs.device).bool().float()
+            text_token_mask = text_dict['text_token_mask'][i]
+            data_samples.gt_instances.positive_maps = positive_map
+            data_samples.gt_instances.text_token_mask = \
+                text_token_mask.unsqueeze(0).repeat(
+                    len(positive_map), 1)
+        if self.use_autocast:
+            with autocast(enabled=True):
+                mask_features, visual_features = self.extract_feat(batch_inputs)
+        else:
+            mask_features, visual_features = self.extract_feat(batch_inputs)
+        head_inputs_dict = self.forward_transformer(visual_features, text_dict,
+                                                    batch_data_samples)
+        head_inputs_dict['mask_features'] = mask_features
+        losses = self.bbox_head.loss(
+            **head_inputs_dict, batch_data_samples=batch_data_samples)
+        return losses
+
+
+    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        mask_features, visual_feats = self.extract_feat(batch_inputs)
+        
+        batch_img_metas = [data_sample.metainfo for data_sample in batch_data_samples]
+        ori_shape = batch_img_metas[0]['ori_shape']
+
+        # load anomaly score maps
+        # anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
+
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                head_inputs_dict['mask_features'] = mask_feature
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            head_inputs_dict['mask_features'] = mask_features
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+
+        for data_sample, pred_instances, entity, is_rec_task, img_metas in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks, batch_img_metas):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
+
+            labels = data_sample.pred_instances.labels
+            scores = data_sample.pred_instances.scores
+            bboxes = data_sample.pred_instances.bboxes
+            
+            y, x = torch.meshgrid(torch.arange(ori_shape[0], device=batch_inputs.device), 
+                                    torch.arange(ori_shape[1], device=batch_inputs.device),
+                                    indexing='ij')
+            x = x.unsqueeze(0)
+            y = y.unsqueeze(0)
+
+            data_sample.pred_instances = data_sample.pred_instances[data_sample.pred_instances.labels == 0]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (1 + bbox_anomaly_score > 0.7)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2)]
+
+            # masks = torch.einsum('qc,qhw->chw', torch.cat((data_sample.pred_instances.scores.unsqueeze(-1), data_sample.pred_instances.scores.unsqueeze(-1)), dim=-1), masks).argmax(dim=0).float()
+
+        return batch_data_samples

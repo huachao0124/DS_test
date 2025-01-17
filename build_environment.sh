@@ -11,5 +11,6 @@ pip install ftfy
 pip install ood_metrics
 pip install numpy==1.23.0
 pip install nltk==3.8.1
+python -m pip install ujson
 echo 'export NLTK_DATA=./nltk_data' >> ~/.bashrc
 source ~/.bashrc

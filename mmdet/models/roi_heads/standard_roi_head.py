@@ -85,9 +85,16 @@ class StandardRoIHead(BaseRoIHead):
             results = results + (bbox_results['cls_score'],
                                  bbox_results['bbox_pred'])
         # mask head
-        if self.with_mask:
+        # if self.with_mask:
+        if True:
             mask_rois = rois[:100]
             mask_results = self._mask_forward(x, mask_rois)
+
+            print("X" * 100)
+            print(mask_results['mask_preds'].shape)
+            print(len(rpn_results_list))
+            print(rpn_results_list[0].bboxes.shape)
+
             results = results + (mask_results['mask_preds'], )
         return results
 
@@ -140,6 +147,10 @@ class StandardRoIHead(BaseRoIHead):
             mask_results = self.mask_loss(x, sampling_results,
                                           bbox_results['bbox_feats'],
                                           batch_gt_instances)
+            print("X" * 100)
+            print(mask_results['mask_preds'].shape)
+            print(len(sampling_results))
+            print(sampling_results[0].bboxes.shape)
             losses.update(mask_results['loss_mask'])
 
         return losses
@@ -244,6 +255,12 @@ class StandardRoIHead(BaseRoIHead):
 
             mask_results = self._mask_forward(
                 x, pos_inds=pos_inds, bbox_feats=bbox_feats)
+
+        print("Y" * 100)
+        print(x[0].shape)
+        print(mask_results['mask_preds'].shape)
+        print(sampling_results[0].bboxes.shape)
+        print(sampling_results[1].bboxes.shape)
 
         mask_loss_and_target = self.mask_head.loss_and_target(
             mask_preds=mask_results['mask_preds'],

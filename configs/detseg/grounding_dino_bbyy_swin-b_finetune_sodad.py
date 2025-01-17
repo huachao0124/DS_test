@@ -155,14 +155,7 @@ train_pipeline = [
                     keep_ratio=True)
             ]
         ]),
-    dict(type='FilterAnnotations', min_gt_bbox_wh=(1e-2, 1e-2)),
-    # dict(
-    #     type='RandomSamplingNegPos',
-    #     tokenizer_name=lang_model_name,
-    #     num_sample_negative=85,
-    #     max_tokens=256),
-    dict(type='ReplacePrompt'),
-    dict(type='ConcatPrompt'),
+    dict(type='AddPrompt'),
     dict(
         type='PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
@@ -188,19 +181,16 @@ test_pipeline = [
                    'tokens_positive'))
 ]
 
-dataset_type = 'ODVGDataset'
-data_root = 'data/objects365v1/'
+dataset_type = 'SODADDataset'
+data_root = 'data/SODA-D/'
 
-coco_od_dataset = dict(
+train_dataset = dict(
     type=dataset_type,
     data_root=data_root,
-    ann_file='objects365_train_od.json',
-    label_map_file='o365v1_label_map.json',
-    data_prefix=dict(img='train/'),
-    filter_cfg=dict(filter_empty_gt=False),
+    ann_file='divData/Annotations/train.json',
+    data_prefix=dict(img='divData/Images/train'),
     pipeline=train_pipeline,
-    return_classes=True,
-    backend_args=None)
+    ori_ann_file=data_root + 'rawData/Annotations/train.json')
 
 train_dataloader = dict(
     _delete_=True,
@@ -209,7 +199,7 @@ train_dataloader = dict(
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     batch_sampler=dict(type='AspectRatioBatchSampler'),
-    dataset=dict(type='ConcatDataset', datasets=[coco_od_dataset]))
+    dataset=train_dataset)
 
 val_dataloader = dict(
     dataset=dict(pipeline=test_pipeline, return_classes=True))
@@ -234,7 +224,7 @@ optim_wrapper = dict(
         }))
 
 # learning policy
-max_epochs = 1
+# max_epochs = 1
 # param_scheduler = [
 #     dict(
 #         type='MultiStepLR',
@@ -267,7 +257,7 @@ train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=38038, val_
 auto_scale_lr = dict(base_batch_size=16)
 
 default_hooks = dict(visualization=dict(type='GroundingVisualizationHook'),
-                     checkpoint=dict(type='CheckpointHook', interval=5000, by_epoch=False),)
+                     checkpoint=dict(type='CheckpointHook', interval=5000, by_epoch=False))
 
 load_from = 'ckpts/grounding_dino_swin-b_pretrain_all-f9818a7c.pth'
 # load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-b_pretrain_obj365_goldg_v3det/grounding_dino_swin-b_pretrain_obj365_goldg_v3de-f83eef00.pth'  # noqa
