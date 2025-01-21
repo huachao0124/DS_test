@@ -48,7 +48,7 @@ model = dict(
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
+        init_cfg=None),
     neck=dict(
         type='ChannelMapper',
         in_channels=[256, 512, 1024],
@@ -95,7 +95,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHeadTB',
+        type='GroundingDINOHeadPT',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -351,13 +351,13 @@ default_hooks = dict(
         type='CheckpointHook', by_epoch=False, interval=1000),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     # visualization=dict(type='SegVisualizationWithResizeHook', draw=True, interval=1))
-    visualization=dict(type='GroundingVisualizationHook', draw=False, interval=1, score_thr=0.0))
+    visualization=dict(type='GroundingVisualizationHook', draw=False, interval=5, score_thr=0.1))
 
 vis_backends = [dict(type='LocalVisBackend')]
-# visualizer = dict(
-    # type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
 visualizer = dict(
-    type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+    type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
+# visualizer = dict(
+#     type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 log_processor = dict(by_epoch=False)
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
@@ -365,5 +365,4 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-# load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
-load_from = 'iter_90000.pth'
+load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'

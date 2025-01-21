@@ -92,7 +92,7 @@ model = dict(
     positional_encoding=dict(
         num_feats=128, normalize=True, offset=0.0, temperature=20),
     bbox_head=dict(
-        type='GroundingDINOHeadTB',
+        type='GroundingDINOHeadPT',
         num_classes=256,
         sync_cls_avg_factor=True,
         contrastive_cfg=dict(max_text_len=256, log_scale='auto', bias=True),
@@ -101,8 +101,8 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=2.0),  # 2.0 in DeformDETR
-        loss_bbox=dict(type='L1Loss', loss_weight=5.0)),
+            loss_weight=5.0),  # 2.0 in DeformDETR
+        loss_bbox=dict(type='L1Loss', loss_weight=2.0)),
     dn_cfg=dict(  # TODO: Move to model.train_cfg ?
         label_noise_scale=0.5,
         box_noise_scale=1.0,  # 0.4 for DN-DETR

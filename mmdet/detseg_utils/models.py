@@ -64,6 +64,10 @@ from mmdet.models.dense_heads.atss_vlfusion_head import convert_grounding_to_cls
 from mmdet.models.dense_heads.grounding_dino_head import ContrastiveEmbed
 from mmdet.models.task_modules.samplers import SamplingResult
 
+try:
+    from fairscale.nn.checkpoint import checkpoint_wrapper
+except Exception:
+    checkpoint_wrapper = None
 
 def clean_label_name(name: str) -> str:
     name = re.sub(r'\(.*\)', '', name)
@@ -3158,7 +3162,7 @@ class GroundingDINOTBSeg(GroundingDINOTB):
 
         super().__init__(**kwargs)
 
-        self.neck_seg = MyNeck([128, 256, 512, 1024])
+        # self.neck_seg = MyNeck([128, 256, 512, 1024])
 
         # self.neck_seg = MODELS.build(dict(
         #                     type='ChannelMapper',
@@ -3222,9 +3226,9 @@ class GroundingDINOTBSeg(GroundingDINOTB):
         if self.with_neck:
             x_uc = self.neck(x[1:])
 
-        x_seg = self.neck_seg(x)
+        # x_seg = self.neck_seg(x)
 
-        return x_seg, x_uc
+        return x, x_uc
 
     def loss(self, batch_inputs: Tensor,
              batch_data_samples: SampleList) -> Union[dict, list]:
@@ -4537,7 +4541,7 @@ class GroundingDINOPTSeg(GroundingDINOPT):
 
         super().__init__(**kwargs)
 
-        self.neck_seg = MyNeck([128, 256, 512, 1024])
+        # self.neck_seg = MyNeck([128, 256, 512, 1024])
 
         # self.neck_seg = MODELS.build(dict(
         #                     type='ChannelMapper',
@@ -4579,6 +4583,10 @@ class GroundingDINOPTSeg(GroundingDINOPT):
             m.requires_grad = False
         for m in self.memory_trans_norm.parameters():
             m.requires_grad = False
+        for m in self.memory_trans_fc_bbyy.parameters():
+            m.requires_grad = False
+        for m in self.memory_trans_norm_bbyy.parameters():
+            m.requires_grad = False
         for m in self.language_model.parameters():
             m.requires_grad = False
         for m in self.text_feat_map.parameters():
@@ -4604,9 +4612,9 @@ class GroundingDINOPTSeg(GroundingDINOPT):
         if self.with_neck:
             x_uc = self.neck(x[1:])
 
-        x_seg = self.neck_seg(x)
+        # x_seg = self.neck_seg(x)
 
-        return x_seg, x_uc
+        return x, x_uc
 
     def plot_vp_region(self, ori_shape, data_sample):
 
@@ -4681,6 +4689,12 @@ class GroundingDINOPTSeg(GroundingDINOPT):
         ori_shape = batch_img_metas[0]['ori_shape']
         seg_logits_ori_shape = F.interpolate(seg_logits, ori_shape, mode='bilinear', align_corners=False)
         seg_preds = seg_logits_ori_shape.argmax(dim=1)
+
+
+        batch_data_samples =  self.postprocess_result(seg_logits, batch_data_samples)
+
+        return batch_data_samples
+
         # anomaly_scores = -torch.max(seg_logits_ori_shape[:, :19], dim=1)[0].unsqueeze(1)
         anomaly_scores = -torch.sum(seg_logits_ori_shape[:, :19].tanh(), dim=1).unsqueeze(1)
 
@@ -4823,8 +4837,8 @@ class GroundingDINOPTSeg(GroundingDINOPT):
             # data_sample.pred_instances.scores = torch.maximum(data_sample.pred_instances.scores, 1 + bbox_anomaly_score)
 
 
-            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (1 + bbox_anomaly_score > 0.7)]
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.1)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (1 + bbox_anomaly_score > 0.7)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.1)]
 
 
             bboxes_anomaly = data_sample.pred_instances.bboxes.unsqueeze(1).unsqueeze(1)
@@ -4845,26 +4859,26 @@ class GroundingDINOPTSeg(GroundingDINOPT):
             # })
 
 
-            # all_masks = []
-            # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
-            #     masks = torch.zeros_like(input_img[:1])
-            #     # input_img = F.interpolate(input_img.unsqueeze(0), size=(1024,1024), mode='bilinear')
-            #     if len(data_sample.pred_instances) > 0:
-            #         # masks = self.sam_predict(input_img, data_sample.pred_instances.bboxes, ori_shape).to(torch.float32)
-            #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
-            #         # masks = masks[0][:, 0].sum(dim=0).unsqueeze(0).bool().float()
-            #         masks = masks[0][:, 0].bool().float()
-            #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
-            #     data_sample.set_data({
-            #         'pred_sem_seg':
-            #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
-            #         'seg_logits':
-            #         PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
-            #         'pred_masks':
-            #         PixelData(**{'sem_seg': masks.squeeze(1)}),
-            #     })
-            #     all_masks.append(masks)
-            # all_masks = torch.stack(all_masks)
+            all_masks = []
+            for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+                masks = torch.zeros_like(input_img[:1])
+                # input_img = F.interpolate(input_img.unsqueeze(0), size=(1024,1024), mode='bilinear')
+                if len(data_sample.pred_instances) > 0:
+                    # masks = self.sam_predict(input_img, data_sample.pred_instances.bboxes, ori_shape).to(torch.float32)
+                    masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+                    # masks = masks[0][:, 0].sum(dim=0).unsqueeze(0).bool().float()
+                    masks = masks[0][:, 0].bool().float()
+                masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+                data_sample.set_data({
+                    'pred_sem_seg':
+                    PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+                    'seg_logits':
+                    PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+                    'pred_masks':
+                    PixelData(**{'sem_seg': masks.squeeze(1)}),
+                })
+                all_masks.append(masks)
+            all_masks = torch.stack(all_masks)
 
             # polygon_region = self.plot_vp_region(ori_shape, data_sample)
             # data_sample.set_data({
@@ -4981,6 +4995,100 @@ class GroundingDINOPTSeg(GroundingDINOPT):
 
         return masks.max(dim=0)[0]
 
+    def loss(self, batch_inputs: Tensor,
+             batch_data_samples: SampleList) -> Union[dict, list]:
+        text_prompts = [
+            data_samples.text for data_samples in batch_data_samples
+        ]
+
+        gt_labels = [
+            data_samples.gt_instances.labels
+            for data_samples in batch_data_samples
+        ]
+
+        if 'tokens_positive' in batch_data_samples[0]:
+            tokens_positive = [
+                data_samples.tokens_positive
+                for data_samples in batch_data_samples
+            ]
+            positive_maps = []
+            for token_positive, text_prompt, gt_label in zip(
+                    tokens_positive, text_prompts, gt_labels):
+                tokenized = self.language_model.tokenizer(
+                    [text_prompt],
+                    padding='max_length'
+                    if self.language_model.pad_to_max else 'longest',
+                    return_tensors='pt')
+                new_tokens_positive = [
+                    token_positive[label.item()] for label in gt_label
+                ]
+                _, positive_map = self.get_positive_map(
+                    tokenized, new_tokens_positive)
+                positive_maps.append(positive_map)
+            new_text_prompts = text_prompts
+        else:
+            new_text_prompts = []
+            positive_maps = []
+            if len(set(text_prompts)) == 1:
+                # All the text prompts are the same,
+                # so there is no need to calculate them multiple times.
+                tokenized, caption_string, tokens_positive, _ = \
+                    self.get_tokens_and_prompts(
+                        text_prompts[0], True)
+                new_text_prompts = [caption_string] * len(batch_inputs)
+                for gt_label in gt_labels:
+                    new_tokens_positive = [
+                        tokens_positive[label] for label in gt_label
+                    ]
+                    _, positive_map = self.get_positive_map(
+                        tokenized, new_tokens_positive)
+                    positive_maps.append(positive_map)
+            else:
+                for text_prompt, gt_label in zip(text_prompts, gt_labels):
+                    tokenized, caption_string, tokens_positive, _ = \
+                        self.get_tokens_and_prompts(
+                            text_prompt, True)
+                    new_tokens_positive = [
+                        tokens_positive[label] for label in gt_label
+                    ]
+                    
+                    _, positive_map = self.get_positive_map(
+                        tokenized, new_tokens_positive)
+                    positive_maps.append(positive_map)
+                    new_text_prompts.append(caption_string)
+        
+        text_dict = self.language_model(new_text_prompts)
+        if self.text_feat_map is not None:
+            text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
+
+        for i, data_samples in enumerate(batch_data_samples):
+            positive_map = positive_maps[i].to(
+                batch_inputs.device).bool().float()
+            text_token_mask = text_dict['text_token_mask'][i]
+            data_samples.gt_instances.positive_maps = positive_map
+            data_samples.gt_instances.text_token_mask = \
+                text_token_mask.unsqueeze(0).repeat(
+                    len(positive_map), 1)
+        if self.use_autocast:
+            with autocast(enabled=True):
+                backbone_features, visual_features = self.extract_feat(batch_inputs)
+        else:
+            backbone_features, visual_features = self.extract_feat(batch_inputs)
+        # head_inputs_dict, _ = self.forward_transformer(visual_features, text_dict,
+        #                                             batch_data_samples)
+
+        # losses = self.bbox_head.loss(
+        #     **head_inputs_dict, batch_data_samples=batch_data_samples)
+        
+        losses = dict()
+        # losses.update(self.bbox_head.loss(**head_inputs_dict, batch_data_samples=batch_data_samples))
+        for data_samples in batch_data_samples:
+            gt_sem_seg = data_samples.gt_sem_seg.sem_seg
+            data_samples.gt_sem_seg = PixelData(sem_seg=gt_sem_seg, data=gt_sem_seg.long())
+        losses.update(self.seg_decoder.loss(backbone_features, batch_data_samples, None))
+        
+        return losses
+
 @MODELS.register_module()
 class GroundingDINOHeadPT(GroundingDINOHead):
     """Head of the Grounding DINO: Marrying DINO with Grounded Pre-Training for
@@ -5067,37 +5175,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
         memory_text: Tensor,
         text_token_mask: Tensor,
     ) -> Tuple[Tensor]:
-        """Forward function.
-
-        Args:
-            hidden_states (Tensor): Hidden states output from each decoder
-                layer, has shape (num_decoder_layers, bs, num_queries, dim).
-            references (List[Tensor]): List of the reference from the decoder.
-                The first reference is the `init_reference` (initial) and the
-                other num_decoder_layers(6) references are `inter_references`
-                (intermediate). The `init_reference` has shape (bs,
-                num_queries, 4) when `as_two_stage` of the detector is `True`,
-                otherwise (bs, num_queries, 2). Each `inter_reference` has
-                shape (bs, num_queries, 4) when `with_box_refine` of the
-                detector is `True`, otherwise (bs, num_queries, 2). The
-                coordinates are arranged as (cx, cy) when the last dimension is
-                2, and (cx, cy, w, h) when it is 4.
-            memory_text (Tensor): Memory text. It has shape (bs, len_text,
-                text_embed_dims).
-            text_token_mask (Tensor): Text token mask. It has shape (bs,
-                len_text).
-
-        Returns:
-            tuple[Tensor]: results of head containing the following tensor.
-
-            - all_layers_outputs_classes (Tensor): Outputs from the
-              classification head, has shape (num_decoder_layers, bs,
-              num_queries, cls_out_channels).
-            - all_layers_outputs_coords (Tensor): Sigmoid outputs from the
-              regression head with normalized coordinate format (cx, cy, w,
-              h), has shape (num_decoder_layers, bs, num_queries, 4) with the
-              last dimension arranged as (cx, cy, w, h).
-        """
         all_layers_outputs_classes = []
         all_layers_outputs_classes_bbyy = []
         all_layers_outputs_coords = []
@@ -5140,36 +5217,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                 text_token_mask: Tensor,
                 batch_data_samples: SampleList,
                 rescale: bool = True) -> InstanceList:
-        """Perform forward propagation and loss calculation of the detection
-        head on the queries of the upstream network.
-
-        Args:
-            hidden_states (Tensor): Hidden states output from each decoder
-                layer, has shape (num_decoder_layers, num_queries, bs, dim).
-            references (List[Tensor]): List of the reference from the decoder.
-                The first reference is the `init_reference` (initial) and the
-                other num_decoder_layers(6) references are `inter_references`
-                (intermediate). The `init_reference` has shape (bs,
-                num_queries, 4) when `as_two_stage` of the detector is `True`,
-                otherwise (bs, num_queries, 2). Each `inter_reference` has
-                shape (bs, num_queries, 4) when `with_box_refine` of the
-                detector is `True`, otherwise (bs, num_queries, 2). The
-                coordinates are arranged as (cx, cy) when the last dimension is
-                2, and (cx, cy, w, h) when it is 4.
-            memory_text (Tensor): Memory text. It has shape (bs, len_text,
-                text_embed_dims).
-            text_token_mask (Tensor): Text token mask. It has shape (bs,
-                len_text).
-            batch_data_samples (SampleList): The Data
-                Samples. It usually includes information such as
-                `gt_instance`, `gt_panoptic_seg` and `gt_sem_seg`.
-            rescale (bool, optional): If `True`, return boxes in original
-                image space. Defaults to `True`.
-
-        Returns:
-            InstanceList: Detection results of each image
-                after the post process.
-        """
         batch_img_metas = [
             data_samples.metainfo for data_samples in batch_data_samples
         ]
@@ -5194,34 +5241,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                         batch_img_metas: List[Dict],
                         batch_token_positive_maps: Optional[List[dict]] = None,
                         rescale: bool = False) -> InstanceList:
-        """Transform a batch of output features extracted from the head into
-        bbox results.
-
-        Args:
-            all_layers_cls_scores (Tensor):  Classification scores of all
-                decoder layers, has shape (num_decoder_layers, bs, num_queries,
-                cls_out_channels).
-            all_layers_bbox_preds (Tensor): Regression outputs of all decoder
-                layers. Each is a 4D-tensor with normalized coordinate format
-                (cx, cy, w, h) and shape (num_decoder_layers, bs, num_queries,
-                4) with the last dimension arranged as (cx, cy, w, h).
-            batch_img_metas (List[Dict]): _description_
-            batch_token_positive_maps (list[dict], Optional): Batch token
-                positive map. Defaults to None.
-            rescale (bool): If True, return boxes in original image space.
-                Defaults to False.
-
-        Returns:
-            list[:obj:`InstanceData`]: Object detection results of each image
-            after the post process. Each item usually contains following keys.
-
-                - scores (Tensor): Classification scores, has a shape
-                  (num_instance, )
-                - labels (Tensor): Labels of bboxes, has a shape
-                  (num_instances, ).
-                - bboxes (Tensor): Has a shape (num_instances, 4),
-                  the last dimension 4 arrange as (x1, y1, x2, y2).
-        """
         cls_scores = all_layers_cls_scores[-1][:, :self.num_queries]
         cls_scores_bbyy = all_layers_outputs_classes_bbyy[-1][:, -self.num_queries_bbyy:]
         bbox_preds = all_layers_bbox_preds[-1]
@@ -5250,14 +5269,14 @@ class GroundingDINOHeadPT(GroundingDINOHead):
 
             mask = (labels != 0) & (scores > thres)
 
-            scores[mask] *= 1.2
+            scores[mask] *= 1.6
             det_bboxes, keep = batched_nms(bboxes, scores, labels,  
                                                 nms_cfg=dict(iou_threshold=0.5), class_agnostic=True)
             results = InstanceData()
             results.bboxes = det_bboxes[:, :-1]
             results.scores = det_bboxes[:, -1]
             results.labels = labels[keep]
-            results.scores[mask[keep]] /= 1.2
+            results.scores[mask[keep]] /= 1.6
 
             result_list.append(results)
         return result_list
@@ -5267,31 +5286,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                                 bbox_pred: Tensor,
                                 img_meta: dict,
                                 rescale: bool = True) -> InstanceData:
-        """Transform outputs from the last decoder layer into bbox predictions
-        for each image.
-
-        Args:
-            cls_score (Tensor): Box score logits from the last decoder layer
-                for each image. Shape [num_queries, cls_out_channels].
-            bbox_pred (Tensor): Sigmoid outputs from the last decoder layer
-                for each image, with coordinate format (cx, cy, w, h) and
-                shape [num_queries, 4].
-            img_meta (dict): Image meta info.
-            rescale (bool): If True, return boxes in original image
-                space. Default True.
-
-        Returns:
-            :obj:`InstanceData`: Detection results of each image
-            after the post process.
-            Each item usually contains following keys.
-
-                - scores (Tensor): Classification scores, has a shape
-                  (num_instance, )
-                - labels (Tensor): Labels of bboxes, has a shape
-                  (num_instances, ).
-                - bboxes (Tensor): Has a shape (num_instances, 4),
-                  the last dimension 4 arrange as (x1, y1, x2, y2).
-        """
         assert len(cls_score) == len(bbox_pred)  # num_queries
         max_per_img = self.test_cfg.get('max_per_img', len(cls_score))
         img_shape = img_meta['img_shape']
@@ -5331,40 +5325,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
              memory_text: Tensor, text_token_mask: Tensor,
              enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
              batch_data_samples: SampleList, dn_meta: Dict[str, int]) -> dict:
-        """Perform forward propagation and loss calculation of the detection
-        head on the queries of the upstream network.
-
-        Args:
-            hidden_states (Tensor): Hidden states output from each decoder
-                layer, has shape (num_decoder_layers, bs, num_queries_total,
-                dim), where `num_queries_total` is the sum of
-                `num_denoising_queries` and `num_matching_queries` when
-                `self.training` is `True`, else `num_matching_queries`.
-            references (list[Tensor]): List of the reference from the decoder.
-                The first reference is the `init_reference` (initial) and the
-                other num_decoder_layers(6) references are `inter_references`
-                (intermediate). The `init_reference` has shape (bs,
-                num_queries_total, 4) and each `inter_reference` has shape
-                (bs, num_queries, 4) with the last dimension arranged as
-                (cx, cy, w, h).
-            memory_text (Tensor): Memory text. It has shape (bs, len_text,
-                text_embed_dims).
-            enc_outputs_class (Tensor): The score of each point on encode
-                feature map, has shape (bs, num_feat_points, cls_out_channels).
-            enc_outputs_coord (Tensor): The proposal generate from the
-                encode feature map, has shape (bs, num_feat_points, 4) with the
-                last dimension arranged as (cx, cy, w, h).
-            batch_data_samples (list[:obj:`DetDataSample`]): The Data
-                Samples. It usually includes information such as
-                `gt_instance`, `gt_panoptic_seg` and `gt_sem_seg`.
-            dn_meta (Dict[str, int]): The dictionary saves information about
-              group collation, including 'num_denoising_queries' and
-              'num_denoising_groups'. It will be used for split outputs of
-              denoising and matching parts and loss calculation.
-
-        Returns:
-            dict: A dictionary of loss components.
-        """
         batch_gt_instances = []
         batch_img_metas = []
 
@@ -5396,40 +5356,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
         dn_meta: Dict[str, int],
         batch_gt_instances_ignore: OptInstanceList = None
     ) -> Dict[str, Tensor]:
-        """Loss function.
-
-        Args:
-            all_layers_cls_scores (Tensor): Classification scores of all
-                decoder layers, has shape (num_decoder_layers, bs,
-                num_queries_total, cls_out_channels), where
-                `num_queries_total` is the sum of `num_denoising_queries`
-                and `num_matching_queries`.
-            all_layers_bbox_preds (Tensor): Regression outputs of all decoder
-                layers. Each is a 4D-tensor with normalized coordinate format
-                (cx, cy, w, h) and has shape (num_decoder_layers, bs,
-                num_queries_total, 4).
-            enc_cls_scores (Tensor): The score of each point on encode
-                feature map, has shape (bs, num_feat_points, cls_out_channels).
-            enc_bbox_preds (Tensor): The proposal generate from the encode
-                feature map, has shape (bs, num_feat_points, 4) with the last
-                dimension arranged as (cx, cy, w, h).
-            batch_gt_instances (list[:obj:`InstanceData`]): Batch of
-                gt_instance. It usually includes ``bboxes`` and ``labels``
-                attributes.
-            batch_img_metas (list[dict]): Meta information of each image, e.g.,
-                image size, scaling factor, etc.
-            dn_meta (Dict[str, int]): The dictionary saves information about
-                group collation, including 'num_denoising_queries' and
-                'num_denoising_groups'. It will be used for split outputs of
-                denoising and matching parts and loss calculation.
-            batch_gt_instances_ignore (list[:obj:`InstanceData`], optional):
-                Batch of gt_instances_ignore. It includes ``bboxes`` attribute
-                data that is ignored during training and testing.
-                Defaults to None.
-
-        Returns:
-            dict[str, Tensor]: A dictionary of loss components.
-        """
         # extract denoising and matching part of outputs
         (all_layers_matching_cls_scores, all_layers_matching_cls_scores_bbyy, all_layers_matching_bbox_preds,
          all_layers_denoising_cls_scores, all_layers_denoising_cls_scores_bbyy, all_layers_denoising_bbox_preds) = \
@@ -5467,25 +5393,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
     def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor,
                             batch_gt_instances: InstanceList,
                             batch_img_metas: List[dict]) -> Tuple[Tensor]:
-        """Loss function for outputs from a single decoder layer of a single
-        feature level.
-
-        Args:
-            cls_scores (Tensor): Box score logits from a single decoder layer
-                for all images, has shape (bs, num_queries, cls_out_channels).
-            bbox_preds (Tensor): Sigmoid outputs from a single decoder layer
-                for all images, with normalized coordinate (cx, cy, w, h) and
-                shape (bs, num_queries, 4).
-            batch_gt_instances (list[:obj:`InstanceData`]): Batch of
-                gt_instance. It usually includes ``bboxes`` and ``labels``
-                attributes.
-            batch_img_metas (list[dict]): Meta information of each image, e.g.,
-                image size, scaling factor, etc.
-
-        Returns:
-            Tuple[Tensor]: A tuple including `loss_cls`, `loss_box` and
-            `loss_iou`.
-        """
         num_imgs = cls_scores.size(0)
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
         bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
@@ -5568,45 +5475,6 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                       all_layers_cls_scores_bbyy: Tensor,
                       all_layers_bbox_preds: Tensor,
                       dn_meta: Dict[str, int]) -> Tuple[Tensor]:
-        """Split outputs of the denoising part and the matching part.
-
-        For the total outputs of `num_queries_total` length, the former
-        `num_denoising_queries` outputs are from denoising queries, and
-        the rest `num_matching_queries` ones are from matching queries,
-        where `num_queries_total` is the sum of `num_denoising_queries` and
-        `num_matching_queries`.
-
-        Args:
-            all_layers_cls_scores (Tensor): Classification scores of all
-                decoder layers, has shape (num_decoder_layers, bs,
-                num_queries_total, cls_out_channels).
-            all_layers_bbox_preds (Tensor): Regression outputs of all decoder
-                layers. Each is a 4D-tensor with normalized coordinate format
-                (cx, cy, w, h) and has shape (num_decoder_layers, bs,
-                num_queries_total, 4).
-            dn_meta (Dict[str, int]): The dictionary saves information about
-              group collation, including 'num_denoising_queries' and
-              'num_denoising_groups'.
-
-        Returns:
-            Tuple[Tensor]: a tuple containing the following outputs.
-
-            - all_layers_matching_cls_scores (Tensor): Classification scores
-              of all decoder layers in matching part, has shape
-              (num_decoder_layers, bs, num_matching_queries, cls_out_channels).
-            - all_layers_matching_bbox_preds (Tensor): Regression outputs of
-              all decoder layers in matching part. Each is a 4D-tensor with
-              normalized coordinate format (cx, cy, w, h) and has shape
-              (num_decoder_layers, bs, num_matching_queries, 4).
-            - all_layers_denoising_cls_scores (Tensor): Classification scores
-              of all decoder layers in denoising part, has shape
-              (num_decoder_layers, bs, num_denoising_queries,
-              cls_out_channels).
-            - all_layers_denoising_bbox_preds (Tensor): Regression outputs of
-              all decoder layers in denoising part. Each is a 4D-tensor with
-              normalized coordinate format (cx, cy, w, h) and has shape
-              (num_decoder_layers, bs, num_denoising_queries, 4).
-        """
         num_denoising_queries = dn_meta['num_denoising_queries']
         if dn_meta is not None:
             all_layers_denoising_cls_scores = \
@@ -5630,7 +5498,7 @@ class GroundingDINOHeadPT(GroundingDINOHead):
             all_layers_matching_bbox_preds = all_layers_bbox_preds
         return (all_layers_matching_cls_scores, all_layers_matching_cls_scores_bbyy, 
                 all_layers_matching_bbox_preds,
-                all_layers_denoising_cls_scores,all_layers_denoising_cls_scores_bbyy, 
+                all_layers_denoising_cls_scores, all_layers_denoising_cls_scores_bbyy, 
                 all_layers_denoising_bbox_preds)
 
 
@@ -5761,24 +5629,24 @@ class GroundingDINOPTSegSAM(GroundingDINOPT):
                 # for visualization
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.3) & (data_sample.pred_instances.labels == 0)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
         
         
-        # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
-        #     masks = torch.zeros_like(input_img[:1])
-        #     ori_shape = data_sample.metainfo['ori_shape']
-        #     if len(data_sample.pred_instances) > 0:
-        #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
-        #         masks = masks[0][:, 0].bool().float()
-        #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
-        #     data_sample.set_data({
-        #         'pred_sem_seg':
-        #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
-        #         # 'seg_logits':
-        #         # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
-        #         'pred_masks':
-        #         PixelData(**{'sem_seg': masks.squeeze(1)}),
-        #     })
+        for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+            masks = torch.zeros_like(input_img[:1])
+            ori_shape = data_sample.metainfo['ori_shape']
+            if len(data_sample.pred_instances) > 0:
+                masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+                masks = masks[0][:, 0].bool().float()
+            masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+            data_sample.set_data({
+                'pred_sem_seg':
+                PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+                # 'seg_logits':
+                # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+                'pred_masks':
+                PixelData(**{'sem_seg': masks.squeeze(1)}),
+            })
 
         return batch_data_samples
 

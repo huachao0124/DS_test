@@ -434,8 +434,6 @@ class DetLocalVisualizer(Visualizer):
         classes = self.dataset_meta.get('classes', None)
         palette = self.dataset_meta.get('palette', None)
 
-        palette = [(199, 42, 72)] + [(0, 255, 0)] * 30
-
         gt_img_data = None
         pred_img_data = None
 

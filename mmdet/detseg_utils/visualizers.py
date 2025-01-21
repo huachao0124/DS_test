@@ -135,10 +135,10 @@ class VisualizerHeatMap(DetLocalVisualizer):
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
         heatmap = (heatmap * 255).astype(np.uint8)
         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)[:, :, ::-1]
-        # drawn_img = np.concatenate((drawn_img, heatmap), axis=1)
+        drawn_img = np.concatenate((drawn_img, heatmap), axis=1)
 
         # drawn_img = heatmap
-        drawn_img = self.plot_mask_on_img(image, data_sample.pred_sem_seg.sem_seg.cpu().numpy())
+        # drawn_img = self.plot_mask_on_img(image, data_sample.pred_sem_seg.sem_seg.cpu().numpy())
         
         # It is convenient for users to obtain the drawn image.
         # For example, the user wants to obtain the drawn image and

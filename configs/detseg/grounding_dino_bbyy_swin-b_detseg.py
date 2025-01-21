@@ -328,16 +328,15 @@ test_pipeline = [
 # dataset settings
 train_dataset_type = 'CityscapesWithCocoDataset'
 train_data_root = 'data/cityscapes/'
-test_dataset_type = 'RoadAnomalyDataset'
-test_data_root = 'data/RoadAnomaly'
-# test_dataset_type = 'FSLostAndFoundDataset'
-# test_data_root = 'data/FS_LostFound'
+# test_dataset_type = 'RoadAnomalyDataset'
+# test_data_root = 'data/RoadAnomaly'
+test_dataset_type = 'FSLostAndFoundDataset'
+test_data_root = 'data/FS_LostFound'
 # test_data_root = 'data/FS_Static'
 # test_dataset_type = 'SMIYCDataset'
 # test_data_root = 'data/SMIYC/dataset_AnomalyTrack'
-
-test_dataset_type = 'LostAndFoundDataset'
-test_data_root = 'data/LostAndFound'
+# test_dataset_type = 'LostAndFoundDataset'
+# test_data_root = 'data/LostAndFound'
 
 
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
@@ -375,14 +374,14 @@ val_dataloader = dict(dataset=dict(_delete_=True,
                                     # img_suffix='.webp',
                                     # img_suffix='.jpg',
                                     data_prefix=dict(
-                                        # img_path='images', seg_map_path='labels_masks'),))
+                                        img_path='images', seg_map_path='labels_masks'),))
                                         # img_path='original', seg_map_path='labels'),))
-                                        img_path='leftImg8bit/test', seg_map_path='gtCoarse/test'),))
+                                        # img_path='leftImg8bit/test', seg_map_path='gtCoarse/test'),))
 test_dataloader = val_dataloader
 # val_evaluator = dict(type='AnomalyMetricRbA')
 # val_evaluator = dict(type='BlankMetric')
-# val_evaluator = dict(type='AnomalyIoUMetric')
-val_evaluator = dict(type='AnomalyMetricLoad')
+val_evaluator = dict(type='AnomalyIoUMetric')
+# val_evaluator = dict(type='AnomalyMetricLoad')
 test_evaluator = val_evaluator
 
 # training schedule for 90k

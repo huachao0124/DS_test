@@ -10,7 +10,7 @@ pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINOTBSeg',
+    type='GroundingDINOPTSeg',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -49,7 +49,7 @@ model = dict(
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=dict(type='Pretrained', checkpoint=pretrained)),
+        init_cfg=None),
     neck=dict(
         type='ChannelMapper',
         in_channels=[256, 512, 1024],
@@ -386,4 +386,5 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_obj365/iter_38038.pth'
+# load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_obj365/iter_38038.pth'
+load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_mix_data/epoch_4.pth'
