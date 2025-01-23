@@ -255,6 +255,7 @@ train_pipeline = [
     dict(type='RandomCrop', crop_size=crop_size),
     dict(type='RandomFlip', prob=0.5),
     dict(type='PhotoMetricDistortion'),
+    dict(type='AddPrompt'),
     dict(type='ConcatPrompt'),
     dict(
         type='PackDetInputs',
@@ -274,6 +275,7 @@ test_pipeline = [
         backend='pillow'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
     # dict(type='UnifyGT', label_map={0: 0, 2: 1}),
+    dict(type='AddPrompt'),
     dict(type='ConcatPrompt'),
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
@@ -282,10 +284,10 @@ test_pipeline = [
 ]
 
 # dataset settings
-train_dataset_type = 'CityscapesDatasetDetSeg'
-train_data_root = 'data/cityscapes/'
-test_dataset_type = 'CityscapesDatasetDetSeg'
-test_data_root = 'data/cityscapes/'
+# train_dataset_type = 'CityscapesDatasetDetSeg'
+# train_data_root = 'data/cityscapes/'
+# test_dataset_type = 'CityscapesDatasetDetSeg'
+# test_data_root = 'data/cityscapes/'
 
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
             'traffic light', 'traffic sign', 'vegetation', 'terrain',
@@ -299,62 +301,62 @@ palette = [(128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
 
 metainfo = dict(classes=class_name, palette=palette)
 
-train_dataloader = dict(_delete_=True,
-                        batch_size=2,
-                        num_workers=2,
-                        # sampler=dict(type='DefaultSampler', shuffle=True),
-                        # batch_sampler=dict(type='AspectRatioBatchSampler'),
-                        sampler=dict(type='InfiniteSampler', shuffle=True),
-                        # batch_sampler=dict(type='InfiniteBatchSampler'),
-                        dataset=dict(
-                                     type=train_dataset_type, 
-                                     data_root=train_data_root, 
-                                     metainfo=metainfo,
-                                     filter_cfg=dict(filter_empty_gt=False, min_size=32),
-                                     return_classes=True,
-                                     data_prefix=dict(
-                                        img='leftImg8bit/train', seg='gtFine/train'),
-                                     ann_file='annotations/instancesonly_filtered_gtFine_train.json',
-                                     pipeline=train_pipeline))
-val_dataloader = dict(dataset=dict(_delete_=True,
-                                    type=test_dataset_type, 
-                                    data_root=test_data_root, 
-                                    pipeline=test_pipeline, 
-                                    metainfo=metainfo,
-                                    filter_cfg=dict(filter_empty_gt=False, min_size=32),
-                                    return_classes=True,
-                                    data_prefix=dict(
-                                        img='leftImg8bit/val', seg='gtFine/val'),
-                                    ann_file='annotations/instancesonly_filtered_gtFine_val.json',))
-
-
-
-
-
-
-# train_dataset_type = 'mmseg.CityscapesDataset'
-# train_data_root = 'data/cityscapes/'
-# test_dataset_type = 'mmseg.CityscapesDataset'
-# test_data_root = 'data/cityscapes/'
-
 # train_dataloader = dict(_delete_=True,
 #                         batch_size=2,
 #                         num_workers=2,
+#                         # sampler=dict(type='DefaultSampler', shuffle=True),
+#                         # batch_sampler=dict(type='AspectRatioBatchSampler'),
 #                         sampler=dict(type='InfiniteSampler', shuffle=True),
 #                         # batch_sampler=dict(type='InfiniteBatchSampler'),
 #                         dataset=dict(
 #                                      type=train_dataset_type, 
 #                                      data_root=train_data_root, 
-#                                     #  num_classes=19,
+#                                      metainfo=metainfo,
+#                                      filter_cfg=dict(filter_empty_gt=False, min_size=32),
+#                                      return_classes=True,
 #                                      data_prefix=dict(
-#                                         img_path='leftImg8bit/train', seg_map_path='gtFine/train'),
+#                                         img='leftImg8bit/train', seg='gtFine/train'),
+#                                      ann_file='annotations/instancesonly_filtered_gtFine_train.json',
 #                                      pipeline=train_pipeline))
 # val_dataloader = dict(dataset=dict(_delete_=True,
 #                                     type=test_dataset_type, 
 #                                     data_root=test_data_root, 
 #                                     pipeline=test_pipeline, 
+#                                     metainfo=metainfo,
+#                                     filter_cfg=dict(filter_empty_gt=False, min_size=32),
+#                                     return_classes=True,
 #                                     data_prefix=dict(
-#                                         img_path='leftImg8bit/val', seg_map_path='gtFine/val'),))
+#                                         img='leftImg8bit/val', seg='gtFine/val'),
+#                                     ann_file='annotations/instancesonly_filtered_gtFine_val.json',))
+
+
+
+
+
+
+train_dataset_type = 'mmseg.CityscapesDataset'
+train_data_root = 'data/cityscapes/'
+test_dataset_type = 'mmseg.CityscapesDataset'
+test_data_root = 'data/cityscapes/'
+
+train_dataloader = dict(_delete_=True,
+                        batch_size=2,
+                        num_workers=2,
+                        sampler=dict(type='InfiniteSampler', shuffle=True),
+                        # batch_sampler=dict(type='InfiniteBatchSampler'),
+                        dataset=dict(
+                                     type=train_dataset_type, 
+                                     data_root=train_data_root, 
+                                    #  num_classes=19,
+                                     data_prefix=dict(
+                                        img_path='leftImg8bit/train', seg_map_path='gtFine/train'),
+                                     pipeline=train_pipeline))
+val_dataloader = dict(dataset=dict(_delete_=True,
+                                    type=test_dataset_type, 
+                                    data_root=test_data_root, 
+                                    pipeline=test_pipeline, 
+                                    data_prefix=dict(
+                                        img_path='leftImg8bit/val', seg_map_path='gtFine/val'),))
 
 
 
@@ -364,7 +366,7 @@ val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU'])
 test_evaluator = val_evaluator
 
 # training schedule for 90k
-train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=90000)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=10000)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 default_hooks = dict(
@@ -387,4 +389,4 @@ log_processor = dict(by_epoch=False)
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
 # load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_obj365/iter_38038.pth'
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_mix_data/epoch_4.pth'
+load_from = 'ckpts/epoch_3.pth'

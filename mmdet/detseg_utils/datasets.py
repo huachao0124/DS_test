@@ -707,10 +707,10 @@ class PasteCocoObjects(BaseTransform):
             results['img'] = img
             results['gt_seg_map'] = sem_seg_gt
         
-        r = random.randint(0, 10000)
-        if r < 100:
-            img = cv2.cvtColor(results['img'], cv2.COLOR_BGR2RGB)
-            Image.fromarray(img).save(f'samples/{r}.jpg')
+        # r = random.randint(0, 10000)
+        # if r < 100:
+        #     img = cv2.cvtColor(results['img'], cv2.COLOR_BGR2RGB)
+        #     Image.fromarray(img).save(f'samples/{r}.jpg')
         
         return results
     

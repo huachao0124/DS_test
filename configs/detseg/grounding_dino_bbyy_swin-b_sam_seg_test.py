@@ -259,7 +259,7 @@ default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook', by_epoch=False, interval=5000),
     sampler_seed=dict(type='DistSamplerSeedHook'),
-    visualization=dict(type='GroundingVisualizationHook', draw=True, interval=1, score_thr=0.0))
+    visualization=dict(type='GroundingVisualizationHook', draw=False, interval=1, score_thr=0.0))
 
 vis_backends = [dict(type='LocalVisBackend')]
 # visualizer = dict(

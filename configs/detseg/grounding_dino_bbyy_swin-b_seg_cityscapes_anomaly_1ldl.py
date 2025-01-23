@@ -276,7 +276,7 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='Resize', scale=(1024, 512)),
+    # dict(type='Resize', scale=(1024, 512)),
     dict(
         type='FixScaleResize',
         scale=(800, 1333),
@@ -336,7 +336,7 @@ val_dataloader = dict(dataset=dict(_delete_=True,
                                     data_prefix=dict(
                                         img_path='images', seg_map_path='labels_masks'),))
 test_dataloader = val_dataloader
-val_evaluator = dict(type='AnomalyMetric')
+val_evaluator = dict(type='AnomalyMetricRbA')
 test_evaluator = val_evaluator
 
 # training schedule for 90k

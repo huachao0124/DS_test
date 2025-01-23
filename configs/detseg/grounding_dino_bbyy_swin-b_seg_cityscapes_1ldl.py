@@ -326,7 +326,7 @@ val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU'])
 test_evaluator = val_evaluator
 
 # training schedule for 90k
-train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=90003)
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=90000, val_interval=10000)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 default_hooks = dict(
@@ -349,4 +349,4 @@ log_processor = dict(by_epoch=False)
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
 # load_from = 'work_dirs/grounding_dino_bbyy_swin-t_finetune_obj365/iter_32500.pth'
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_finetune_mix_data/epoch_4.pth'
+load_from = 'ckpts/epoch_3.pth'

@@ -4541,7 +4541,7 @@ class GroundingDINOPTSeg(GroundingDINOPT):
 
         super().__init__(**kwargs)
 
-        # self.neck_seg = MyNeck([128, 256, 512, 1024])
+        self.neck_seg = MyNeck([128, 256, 512, 1024])
 
         # self.neck_seg = MODELS.build(dict(
         #                     type='ChannelMapper',
@@ -4612,7 +4612,7 @@ class GroundingDINOPTSeg(GroundingDINOPT):
         if self.with_neck:
             x_uc = self.neck(x[1:])
 
-        # x_seg = self.neck_seg(x)
+        x = self.neck_seg(x)
 
         return x, x_uc
 
@@ -5502,12 +5502,425 @@ class GroundingDINOHeadPT(GroundingDINOHead):
                 all_layers_denoising_bbox_preds)
 
 
+@MODELS.register_module()
+class GroundingDINOPTSegAnomaly(GroundingDINOPTSeg):
+    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        backbone_feats, visual_feats = self.extract_feat(batch_inputs)
+        
+        batch_img_metas = [data_sample.metainfo for data_sample in batch_data_samples]
+        seg_logits = self.seg_decoder.predict(backbone_feats, batch_img_metas, None)
+        ori_shape = batch_img_metas[0]['ori_shape']
+        seg_logits_ori_shape = F.interpolate(seg_logits, ori_shape, mode='bilinear', align_corners=False)
+        seg_preds = seg_logits_ori_shape.argmax(dim=1)
+
+        # anomaly_scores = -torch.max(seg_logits_ori_shape[:, :19], dim=1)[0].unsqueeze(1)
+        anomaly_scores = -torch.sum(seg_logits_ori_shape[:, :19].tanh(), dim=1).unsqueeze(1)
+
+        # load anomaly score maps
+        # anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
+
+        # batch_data_samples = self.postprocess_result(seg_logits, batch_data_samples)
+
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+
+        for data_sample, pred_instances, entity, is_rec_task, seg_pred, anomaly_score, img_metas in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks, seg_preds, anomaly_scores, batch_img_metas):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
+
+            labels = data_sample.pred_instances.labels
+            scores = data_sample.pred_instances.scores
+            bboxes = data_sample.pred_instances.bboxes
+
+            mask_id = torch.ones(ori_shape).to(batch_inputs.device)
+            mask_road = torch.ones(ori_shape).to(batch_inputs.device)
+            bboxes_id_mask = (torch.isin(labels, torch.arange(18, 20).to(batch_inputs.device)) & (scores > 0.8)) | \
+                            (torch.isin(labels, torch.arange(3, 12).to(batch_inputs.device)) & (scores > 0.5)) | \
+                            (torch.isin(labels, torch.arange(12, 18).to(batch_inputs.device)) & (scores > 0.5))
+            bboxes_id = bboxes[bboxes_id_mask]
+            bboxes_road = bboxes[scores > 0.2][torch.isin(labels[scores > 0.2], torch.arange(3).to(batch_inputs.device))].int()
+
+            y, x = torch.meshgrid(torch.arange(ori_shape[0], device=batch_inputs.device), 
+                                    torch.arange(ori_shape[1], device=batch_inputs.device),
+                                    indexing='ij')
+            x = x.unsqueeze(0)
+            y = y.unsqueeze(0)
+            bboxes_id = bboxes_id.unsqueeze(1).unsqueeze(1)
+            bboxes_road = bboxes_road.unsqueeze(1).unsqueeze(1)
+            
+            mask_id = mask_id * ((x >= bboxes_id[..., 0]) & (x < bboxes_id[..., 2]) & (y >= bboxes_id[..., 1]) & (y < bboxes_id[..., 3])).any(dim=0)
+            mask_road = mask_road * ((x >= bboxes_road[..., 0]) & (x < bboxes_road[..., 2]) & (y >= bboxes_road[..., 1]) & (y < bboxes_road[..., 3])).any(dim=0)
+            # seg_pred = seg_pred * mask_id
+            mask_road = mask_road * torch.isin(seg_pred, torch.arange(0, 2).to(batch_inputs.device))
+            # mask_road = mask_road.cpu().numpy()
+            # cv2.floodFill(mask_road, None, (0, 0), 1)
+            # mask_road = torch.from_numpy(mask_road).to(batch_inputs.device)
+
+            # 和mask_road overlap > 0.4的bbox 或者4个点都在mask_road中
+            bbox_road_overlap = self.roi_head([mask_road.unsqueeze(0).unsqueeze(0)], [data_sample.pred_instances], [data_sample], False)
+            bbox_road_overlap = bbox_road_overlap.view(len(results_list), -1, *bbox_road_overlap.shape[2:])
+            bboxes[:, 0].clamp_(0, ori_shape[1] - 1)
+            bboxes[:, 1].clamp_(0, ori_shape[0] - 1)
+            bboxes[:, 2].clamp_(0, ori_shape[1] - 1)
+            bboxes[:, 3].clamp_(0, ori_shape[0] - 1)
+            bboxes_mask = (bbox_road_overlap[0].mean(dim=-1).mean(dim=-1).flatten() > 0.4) | (mask_road[bboxes.int()[:, 1], bboxes.int()[:, 0]].bool() & mask_road[bboxes.int()[:, 3], bboxes.int()[:, 2]].bool())
+            # data_sample.pred_instances = data_sample.pred_instances[bboxes_mask]
+
+            data_sample.pred_instances = data_sample.pred_instances[data_sample.pred_instances.labels == 0]
+
+
+            
+            bbox_anomaly_score = self.roi_head([anomaly_score.unsqueeze(0)], [data_sample.pred_instances], [data_sample], False)
+            bbox_anomaly_score = bbox_anomaly_score.view(len(results_list), -1, *bbox_anomaly_score.shape[2:])[0].mean(dim=-1).mean(dim=-1).flatten()
+            bboxes = data_sample.pred_instances.bboxes
+            scores = data_sample.pred_instances.scores
+                # data_sample.pred_instances.scores[(mask_road[bboxes.int()[:, 1], bboxes.int()[:, 0]].bool() & 
+                #                                     mask_road[bboxes.int()[:, 3], bboxes.int()[:, 2]].bool() &
+                #                                     mask_road[bboxes.int()[:, 3], bboxes.int()[:, 0]].bool() &
+                #                                     mask_road[bboxes.int()[:, 1], bboxes.int()[:, 2]].bool())] = 0.9
+
+            # data_sample.pred_instances = data_sample.pred_instances[(bbox_anomaly_score > -0.7) & (scores > 0.3)]
+            # data_sample.pred_instances = data_sample.pred_instances[(scores > 0.3)]
+            # data_sample.pred_instances.scores = bbox_anomaly_score[scores > 0.3]
+            # data_sample.pred_instances.scores = torch.maximum(data_sample.pred_instances.scores, 1 + bbox_anomaly_score)
+
+            print(anomaly_score.max(), anomaly_score.min(), anomaly_score.mean())
+
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (1 + bbox_anomaly_score > 0.8)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.1)]
+
+
+            bboxes_anomaly = data_sample.pred_instances.bboxes.unsqueeze(1).unsqueeze(1)
+            objectness = torch.ones(ori_shape).to(batch_inputs.device) * 0.1
+            objectness[((x >= bboxes_anomaly[..., 0]) & (x < bboxes_anomaly[..., 2]) & (y >= bboxes_anomaly[..., 1]) & (y < bboxes_anomaly[..., 3])).any(dim=0)] = 0.15
+            # anomaly_score = anomaly_score + objectness
+
+            # import os
+            # out_filename = f'score_results/{os.path.basename(img_metas["img_path"])}.npy'
+            # np.save(out_filename, anomaly_score.cpu().numpy())
+
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.38)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.labels == 0)]
+
+            data_sample.set_data({
+                'anomaly_scores':
+                PixelData(**{'data': anomaly_score.squeeze(0)}),
+            })
+
+
+            # all_masks = []
+            # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+            #     masks = torch.zeros_like(input_img[:1])
+            #     # input_img = F.interpolate(input_img.unsqueeze(0), size=(1024,1024), mode='bilinear')
+            #     if len(data_sample.pred_instances) > 0:
+            #         # masks = self.sam_predict(input_img, data_sample.pred_instances.bboxes, ori_shape).to(torch.float32)
+            #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+            #         # masks = masks[0][:, 0].sum(dim=0).unsqueeze(0).bool().float()
+            #         masks = masks[0][:, 0].bool().float()
+            #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+            #     data_sample.set_data({
+            #         'pred_sem_seg':
+            #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+            #         'seg_logits':
+            #         PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+            #         'pred_masks':
+            #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+            #     })
+            #     all_masks.append(masks)
+            # all_masks = torch.stack(all_masks)
+            
+        return batch_data_samples
+
+# det + seg + sam
+@MODELS.register_module()
+class GroundingDINOPTDetSegSAM(GroundingDINOPTSeg):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sam = SamModel.from_pretrained("./sam-vit-base")
+        self.processor = SamProcessor.from_pretrained("./sam-vit-base")
+
+
+    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        backbone_feats, visual_feats = self.extract_feat(batch_inputs)
+        batch_img_metas = [data_sample.metainfo for data_sample in batch_data_samples]
+        seg_logits = self.seg_decoder.predict(backbone_feats, batch_img_metas, None)
+        ori_shape = batch_img_metas[0]['ori_shape']
+        seg_logits_ori_shape = F.interpolate(seg_logits, ori_shape, mode='bilinear', align_corners=False)
+        seg_preds = seg_logits_ori_shape.argmax(dim=1)
+        anomaly_scores = -torch.sum(seg_logits_ori_shape[:, :19].tanh(), dim=1).unsqueeze(1)
+
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+
+        for data_sample, pred_instances, entity, is_rec_task, seg_pred, anomaly_score, img_metas in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks, seg_preds, anomaly_scores, batch_img_metas):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
+            anomaly_score += 0.3
+            bbox_anomaly_score = self.roi_head([anomaly_score.unsqueeze(0)], [data_sample.pred_instances], [data_sample], False)
+            bbox_anomaly_score = bbox_anomaly_score.view(len(results_list), -1, *bbox_anomaly_score.shape[2:])[0].mean(dim=-1).mean(dim=-1).flatten()
+            bboxes = data_sample.pred_instances.bboxes
+            areas = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+            scores = data_sample.pred_instances.scores
+            data_sample.pred_instances.scores[(scores > 0.1) & (areas < 1024)] = bbox_anomaly_score[(scores > 0.1) & (areas < 1024)]
+            # data_sample.pred_instances = data_sample.pred_instances[areas < 1024]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
+        
+        
+        # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+        #     masks = torch.zeros_like(input_img[:1])
+        #     ori_shape = data_sample.metainfo['ori_shape']
+        #     if len(data_sample.pred_instances) > 0:
+        #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+        #         masks = masks[0][:, 0].bool().float()
+        #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+        #     data_sample.set_data({
+        #         'pred_sem_seg':
+        #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+        #         # 'seg_logits':
+        #         # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+        #         'pred_masks':
+        #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+        #     })
+
+        return batch_data_samples
+
+
+    def sam_predict_hf(self, raw_image, boxes):
+        raw_image = Image.open(raw_image).convert("RGB")
+        inputs = self.processor(raw_image, return_tensors="pt").to(self.sam.device)
+        image_embeddings = self.sam.get_image_embeddings(inputs["pixel_values"])
+        inputs = self.processor(raw_image, input_boxes=[boxes.cpu().numpy().tolist()], return_tensors="pt").to(self.sam.device)
+        inputs.pop("pixel_values", None)
+        inputs.update({"image_embeddings": image_embeddings})
+        with torch.no_grad():
+            outputs = self.sam(**inputs)
+        masks = self.processor.image_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu())
+        return masks
+
 
 @MODELS.register_module()
 class GroundingDINOPTSegSAM(GroundingDINOPT):
-    def __init__(self, **kwargs):
+    def __init__(self,
+                 **kwargs):
         super().__init__(**kwargs)
-        
+
         self.sam = SamModel.from_pretrained("./sam-vit-base")
         self.processor = SamProcessor.from_pretrained("./sam-vit-base")
     

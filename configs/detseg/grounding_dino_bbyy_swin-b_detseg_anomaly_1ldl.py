@@ -9,7 +9,7 @@ pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'  # noqa
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINOPTSeg',
+    type='GroundingDINOPTSegAnomaly',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -145,7 +145,7 @@ model = dict(
                     norm_cfg=dict(type='GN', num_groups=32),
                     act_cfg=dict(type='ReLU'),
                     encoder=dict(  # DeformableDetrTransformerEncoder
-                        num_layers=6,
+                        num_layers=1,
                         layer_cfg=dict(  # DeformableDetrTransformerEncoderLayer
                             self_attn_cfg=dict(  # MultiScaleDeformableAttention
                                 embed_dims=256,
@@ -172,7 +172,7 @@ model = dict(
                     num_feats=128, normalize=True),
                 transformer_decoder=dict(  # Mask2FormerTransformerDecoder
                     return_intermediate=True,
-                    num_layers=9,
+                    num_layers=1,
                     layer_cfg=dict(  # Mask2FormerTransformerDecoderLayer
                         self_attn_cfg=dict(  # MultiheadAttention
                             embed_dims=256,
@@ -283,7 +283,7 @@ test_pipeline = [
         keep_ratio=True,
         backend='pillow'),
     dict(type='LoadAnnotations', with_bbox=False, with_seg=True),
-    # dict(type='UnifyGT', label_map={0: 0, 2: 1}),
+    dict(type='UnifyGT', label_map={0: 0, 2: 1}),
     dict(type='ConcatPrompt'),
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
@@ -294,10 +294,10 @@ test_pipeline = [
 # dataset settings
 train_dataset_type = 'CityscapesWithCocoDataset'
 train_data_root = 'data/cityscapes/'
-# test_dataset_type = 'RoadAnomalyDataset'
-# test_data_root = 'data/RoadAnomaly'
-test_dataset_type = 'FSLostAndFoundDataset'
-test_data_root = 'data/FS_LostFound/'
+test_dataset_type = 'RoadAnomalyDataset'
+test_data_root = 'data/RoadAnomaly'
+# test_dataset_type = 'FSLostAndFoundDataset'
+# test_data_root = 'data/FS_LostFound/'
 
 class_name = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
             'traffic light', 'traffic sign', 'vegetation', 'terrain',
@@ -331,12 +331,12 @@ val_dataloader = dict(dataset=dict(_delete_=True,
                                     type=test_dataset_type, 
                                     data_root=test_data_root, 
                                     pipeline=test_pipeline, 
-                                    #  img_suffix='.webp',
+                                     img_suffix='.webp',
                                     # img_suffix='.jpg',
                                     data_prefix=dict(
                                         img_path='images', seg_map_path='labels_masks'),))
 test_dataloader = val_dataloader
-val_evaluator = dict(type='AnomalyMetricRbA')
+val_evaluator = dict(type='AnomalyMetricLoad')
 test_evaluator = val_evaluator
 
 # training schedule for 90k
@@ -365,4 +365,5 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
+# load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
+load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes_1ldl/iter_90000.pth'

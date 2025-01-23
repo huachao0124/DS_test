@@ -9,7 +9,7 @@ pretrained = 'ckpts/swin_base_patch4_window12_384_22k.pth'  # noqa
 lang_model_name = './bert-base-uncased'
 
 model = dict(
-    type='GroundingDINOPTSeg',
+    type='GroundingDINOPTDetSegSAM',
     num_queries=900,
     with_box_refine=True,
     as_two_stage=True,
@@ -145,7 +145,7 @@ model = dict(
                     norm_cfg=dict(type='GN', num_groups=32),
                     act_cfg=dict(type='ReLU'),
                     encoder=dict(  # DeformableDetrTransformerEncoder
-                        num_layers=6,
+                        num_layers=1,
                         layer_cfg=dict(  # DeformableDetrTransformerEncoderLayer
                             self_attn_cfg=dict(  # MultiScaleDeformableAttention
                                 embed_dims=256,
@@ -172,7 +172,7 @@ model = dict(
                     num_feats=128, normalize=True),
                 transformer_decoder=dict(  # Mask2FormerTransformerDecoder
                     return_intermediate=True,
-                    num_layers=9,
+                    num_layers=1,
                     layer_cfg=dict(  # Mask2FormerTransformerDecoderLayer
                         self_attn_cfg=dict(  # MultiheadAttention
                             embed_dims=256,
@@ -336,7 +336,7 @@ val_dataloader = dict(dataset=dict(_delete_=True,
                                     data_prefix=dict(
                                         img_path='images', seg_map_path='labels_masks'),))
 test_dataloader = val_dataloader
-val_evaluator = dict(type='AnomalyMetricRbA')
+val_evaluator = dict(type='AnomalyIoUMetric')
 test_evaluator = val_evaluator
 
 # training schedule for 90k
@@ -354,10 +354,10 @@ default_hooks = dict(
     visualization=dict(type='GroundingVisualizationHook', draw=False, interval=5, score_thr=0.1))
 
 vis_backends = [dict(type='LocalVisBackend')]
-visualizer = dict(
-    type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
 # visualizer = dict(
-#     type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+    # type='VisualizerHeatMap', vis_backends=vis_backends, name='visualizer')
+visualizer = dict(
+    type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 log_processor = dict(by_epoch=False)
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically
@@ -365,4 +365,5 @@ log_processor = dict(by_epoch=False)
 #   - `base_batch_size` = (8 GPUs) x (2 samples per GPU).
 auto_scale_lr = dict(enable=True, base_batch_size=16)
 
-load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
+# load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes/iter_90000.pth'
+load_from = 'work_dirs/grounding_dino_bbyy_swin-b_seg_cityscapes_1ldl/iter_90000.pth'
