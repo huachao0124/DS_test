@@ -4138,6 +4138,160 @@ class GroundingDINOPT(GroundingDINO):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._freeze_modules()
+        self.sam = SamModel.from_pretrained("./sam-vit-base")
+        self.processor = SamProcessor.from_pretrained("./sam-vit-base")
+        for p in self.sam.parameters():
+            p.requires_grad = False
+    
+    def sam_predict_hf(self, raw_image, boxes):
+        raw_image = Image.open(raw_image).convert("RGB")
+        inputs = self.processor(raw_image, return_tensors="pt").to(self.sam.device)
+        image_embeddings = self.sam.get_image_embeddings(inputs["pixel_values"])
+        inputs = self.processor(raw_image, input_boxes=[boxes.cpu().numpy().tolist()], return_tensors="pt").to(self.sam.device)
+        inputs.pop("pixel_values", None)
+        inputs.update({"image_embeddings": image_embeddings})
+        with torch.no_grad():
+            outputs = self.sam(**inputs)
+        masks = self.processor.image_processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu())
+        return masks
+
+    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+        text_prompts = []
+        enhanced_text_prompts = []
+        tokens_positives = []
+        for data_samples in batch_data_samples:
+            text_prompts.append(data_samples.text)
+            if 'caption_prompt' in data_samples:
+                enhanced_text_prompts.append(data_samples.caption_prompt)
+            else:
+                enhanced_text_prompts.append(None)
+            tokens_positives.append(data_samples.get('tokens_positive', None))
+
+        if 'custom_entities' in batch_data_samples[0]:
+            # Assuming that the `custom_entities` flag
+            # inside a batch is always the same. For single image inference
+            custom_entities = batch_data_samples[0].custom_entities
+        else:
+            custom_entities = False
+        if len(text_prompts) == 1:
+            # All the text prompts are the same,
+            # so there is no need to calculate them multiple times.
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(
+                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
+                    tokens_positives[0])
+            ] * len(batch_inputs)
+        else:
+            _positive_maps_and_prompts = [
+                self.get_tokens_positive_and_prompts(text_prompt,
+                                                     custom_entities,
+                                                     enhanced_text_prompt,
+                                                     tokens_positive)
+                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
+                    text_prompts, enhanced_text_prompts, tokens_positives)
+            ]
+        token_positive_maps, text_prompts, _, entities = zip(
+            *_positive_maps_and_prompts)
+
+        # image feature extraction
+        visual_feats = self.extract_feat(batch_inputs)
+
+        if isinstance(text_prompts[0], list):
+            # chunked text prompts, only bs=1 is supported
+            assert len(batch_inputs) == 1
+            count = 0
+            results_list = []
+
+            entities = [[item for lst in entities[0] for item in lst]]
+
+            for b in range(len(text_prompts[0])):
+                text_prompts_once = [text_prompts[0][b]]
+                token_positive_maps_once = token_positive_maps[0][b]
+                text_dict = self.language_model(text_prompts_once)
+                # text feature map layer
+                if self.text_feat_map is not None:
+                    text_dict['embedded'] = self.text_feat_map(
+                        text_dict['embedded'])
+
+                batch_data_samples[
+                    0].token_positive_map = token_positive_maps_once
+
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                pred_instances = self.bbox_head.predict(
+                    **head_inputs_dict,
+                    rescale=rescale,
+                    batch_data_samples=batch_data_samples)[0]
+
+                if len(pred_instances) > 0:
+                    pred_instances.labels += count
+                count += len(token_positive_maps_once)
+                results_list.append(pred_instances)
+            results_list = [results_list[0].cat(results_list)]
+            is_rec_tasks = [False] * len(results_list)
+        else:
+            # extract text feats
+            text_dict = self.language_model(list(text_prompts))
+            # text feature map layer
+            if self.text_feat_map is not None:
+                text_dict['embedded'] = self.text_feat_map(
+                    text_dict['embedded'])
+
+            is_rec_tasks = []
+            for i, data_samples in enumerate(batch_data_samples):
+                if token_positive_maps[i] is not None:
+                    is_rec_tasks.append(False)
+                else:
+                    is_rec_tasks.append(True)
+                data_samples.token_positive_map = token_positive_maps[i]
+
+            head_inputs_dict = self.forward_transformer(
+                visual_feats, text_dict, batch_data_samples)
+            results_list = self.bbox_head.predict(
+                **head_inputs_dict,
+                rescale=rescale,
+                batch_data_samples=batch_data_samples)
+
+        for data_sample, pred_instances, entity, is_rec_task in zip(
+                batch_data_samples, results_list, entities, is_rec_tasks):
+            if len(pred_instances) > 0:
+                label_names = []
+                for labels in pred_instances.labels:
+                    if is_rec_task:
+                        label_names.append(entity)
+                        continue
+                    if labels >= len(entity):
+                        warnings.warn(
+                            'The unexpected output indicates an issue with '
+                            'named entity recognition. You can try '
+                            'setting custom_entities=True and running '
+                            'again to see if it helps.')
+                        label_names.append('unobject')
+                    else:
+                        label_names.append(entity[labels])
+                # for visualization
+                pred_instances.label_names = label_names
+            data_sample.pred_instances = pred_instances
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
+        
+        
+        for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+            masks = torch.zeros_like(input_img[:1])
+            ori_shape = data_sample.metainfo['ori_shape']
+            if len(data_sample.pred_instances) > 0:
+                masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+                masks = masks[0][:, 0].bool().float()
+            masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+            data_sample.set_data({
+                'pred_sem_seg':
+                PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+                # 'seg_logits':
+                # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+                'pred_masks':
+                PixelData(**{'sem_seg': masks.squeeze(1)}),
+            })
+
+        return batch_data_samples
 
     def _freeze_modules(self):  
         for p in self.backbone.parameters():

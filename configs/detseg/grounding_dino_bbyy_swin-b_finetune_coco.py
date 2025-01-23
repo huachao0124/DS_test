@@ -121,7 +121,7 @@ model = dict(
 
 # dataset settings
 train_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=_base_.backend_args),
+    dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(type='RandomFlip', prob=0.5),
     dict(
@@ -155,7 +155,6 @@ train_pipeline = [
                     keep_ratio=True)
             ]
         ]),
-    dict(type='FilterAnnotations', min_gt_bbox_wh=(1e-2, 1e-2)),
     # dict(
     #     type='RandomSamplingNegPos',
     #     tokenizer_name=lang_model_name,
@@ -188,31 +187,28 @@ test_pipeline = [
                    'tokens_positive'))
 ]
 
-dataset_type = 'ODVGDataset'
-data_root = 'data/objects365v1/'
+dataset_type = 'CocoDataset'
+data_root = 'data/coco/'
 
 test_dataset_type = 'FSLostAndFoundDataset'
 test_data_root = 'data/FS_LostFound'
 
-coco_od_dataset = dict(
-    type=dataset_type,
-    data_root=data_root,
-    ann_file='objects365_train_od.json',
-    label_map_file='o365v1_label_map.json',
-    data_prefix=dict(img='train/'),
-    filter_cfg=dict(filter_empty_gt=False),
-    pipeline=train_pipeline,
-    return_classes=True,
-    backend_args=None)
 
 train_dataloader = dict(
-    _delete_=True,
     batch_size=2,
-    num_workers=4,
+    num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     batch_sampler=dict(type='AspectRatioBatchSampler'),
-    dataset=dict(type='ConcatDataset', datasets=[coco_od_dataset]))
+    dataset=dict(
+        _delete_=True,
+        type='CocoDataset',
+        data_root=data_root,
+        ann_file='annotations/instances_train2017.json',
+        data_prefix=dict(img='train2017/'),
+        return_classes=True,
+        filter_cfg=dict(filter_empty_gt=False, min_size=0),
+        pipeline=train_pipeline))
 
 val_dataloader = dict(dataset=dict(_delete_=True,
                                     type=test_dataset_type, 
