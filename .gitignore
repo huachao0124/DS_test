@@ -135,3 +135,4 @@ sam-vit-base
 objectness_time.pdf
 std_objectness.pdf
 test_mmap.ipynb
+other_score_results/

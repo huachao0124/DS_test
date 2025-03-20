@@ -4272,7 +4272,7 @@ class GroundingDINOPT(GroundingDINO):
                 # for visualization
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (data_sample.pred_instances.labels == 0)]
         
         
         for input_img, data_sample in zip(batch_inputs, batch_data_samples):
@@ -4845,15 +4845,15 @@ class GroundingDINOPTSeg(GroundingDINOPT):
         seg_preds = seg_logits_ori_shape.argmax(dim=1)
 
 
-        batch_data_samples =  self.postprocess_result(seg_logits, batch_data_samples)
+        # batch_data_samples =  self.postprocess_result(seg_logits, batch_data_samples)
 
-        return batch_data_samples
+        # return batch_data_samples
 
         # anomaly_scores = -torch.max(seg_logits_ori_shape[:, :19], dim=1)[0].unsqueeze(1)
         anomaly_scores = -torch.sum(seg_logits_ori_shape[:, :19].tanh(), dim=1).unsqueeze(1)
 
         # load anomaly score maps
-        # anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
+        anomaly_scores = torch.from_numpy(np.stack([img_metas['anomaly_score_map'] for img_metas in batch_img_metas])).to(batch_inputs.device).unsqueeze(1)
 
         # batch_data_samples = self.postprocess_result(seg_logits, batch_data_samples)
 
@@ -4991,48 +4991,70 @@ class GroundingDINOPTSeg(GroundingDINOPT):
             # data_sample.pred_instances.scores = torch.maximum(data_sample.pred_instances.scores, 1 + bbox_anomaly_score)
 
 
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2) & (1 + bbox_anomaly_score > 0.7)]
-            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.1)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.1) & (1 + bbox_anomaly_score > 0.8)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.2)]
 
+            # anomaly_score = F.interpolate(anomaly_score.unsqueeze(0), ori_shape, mode='bilinear', align_corners=False).squeeze(0)
+            # print(anomaly_score.max(), anomaly_score.min())
+            # print(anomaly_score.shape, ori_shape)
 
             bboxes_anomaly = data_sample.pred_instances.bboxes.unsqueeze(1).unsqueeze(1)
             objectness = torch.ones(ori_shape).to(batch_inputs.device) * 0.1
             objectness[((x >= bboxes_anomaly[..., 0]) & (x < bboxes_anomaly[..., 2]) & (y >= bboxes_anomaly[..., 1]) & (y < bboxes_anomaly[..., 3])).any(dim=0)] = 1
             anomaly_score = anomaly_score + objectness
 
-            # import os
-            # out_filename = f'score_results/{os.path.basename(img_metas["img_path"])}.npy'
-            # np.save(out_filename, anomaly_score.cpu().numpy())
+            data_sample.set_data({
+                'anomaly_scores':
+                PixelData(**{'data': anomaly_score.squeeze(0)}),
+                'pred_masks':
+                PixelData(**{'sem_seg': anomaly_score.squeeze(0)})
+            })
+
+            import os
+            out_filename = f'upload_results/laf/{os.path.basename(img_metas["img_path"])}.npy'
+            np.save(out_filename, anomaly_score.cpu().numpy())
 
             # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.38)]
             # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.labels == 0)]
 
-            # data_sample.set_data({
-            #     'anomaly_scores':
-            #     PixelData(**{'data': anomaly_score.squeeze(0)}),
-            # })
+
+            # if len(data_sample.pred_instances) > 0:
+            #     masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+            #     masks = masks[0][:, 0].bool().float().to(anomaly_score.device)
+            #     for s, m in zip(data_sample.pred_instances.scores, masks):
+            #         anomaly_score += m.unsqueeze(0)
 
 
-            all_masks = []
-            for input_img, data_sample in zip(batch_inputs, batch_data_samples):
-                masks = torch.zeros_like(input_img[:1])
-                # input_img = F.interpolate(input_img.unsqueeze(0), size=(1024,1024), mode='bilinear')
-                if len(data_sample.pred_instances) > 0:
-                    # masks = self.sam_predict(input_img, data_sample.pred_instances.bboxes, ori_shape).to(torch.float32)
-                    masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
-                    # masks = masks[0][:, 0].sum(dim=0).unsqueeze(0).bool().float()
-                    masks = masks[0][:, 0].bool().float()
-                masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
-                data_sample.set_data({
-                    'pred_sem_seg':
-                    PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
-                    'seg_logits':
-                    PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
-                    'pred_masks':
-                    PixelData(**{'sem_seg': masks.squeeze(1)}),
-                })
-                all_masks.append(masks)
-            all_masks = torch.stack(all_masks)
+            data_sample.set_data({
+                'anomaly_scores':
+                PixelData(**{'data': anomaly_score.squeeze(0)}),
+            })
+
+
+            # all_masks = []
+            # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+            #     masks = torch.zeros_like(input_img[:1])
+            #     # input_img = F.interpolate(input_img.unsqueeze(0), size=(1024,1024), mode='bilinear')
+            #     if len(data_sample.pred_instances) > 0:
+            #         # masks = self.sam_predict(input_img, data_sample.pred_instances.bboxes, ori_shape).to(torch.float32)
+            #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+            #         # masks = masks[0][:, 0].sum(dim=0).unsqueeze(0).bool().float()
+            #         masks = masks[0][:, 0].bool().float()
+            #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+            #     data_sample.set_data({
+            #         'pred_sem_seg':
+            #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+            #         'seg_logits':
+            #         PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+            #         'pred_masks':
+            #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+            #     })
+            #     all_masks.append(masks)
+            # all_masks = torch.stack(all_masks)
+
+
+
+
 
             # polygon_region = self.plot_vp_region(ori_shape, data_sample)
             # data_sample.set_data({
@@ -5414,25 +5436,37 @@ class GroundingDINOHeadPT(GroundingDINOHead):
             scores = torch.cat((results_id.scores, results_uni.scores), dim=0)
             labels = torch.cat((results_id.labels, results_uni.labels), dim=0)
 
+            # results_id = results_id[results_id.scores > 0.225]
+
+            # bboxes = results_id.bboxes
+            # scores = results_id.scores
+            # labels = results_id.labels
+            
+
             thres_dict = {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2, 6: 0.2, 7: 0.2, 8: 0.2, 9: 0.2, 10: 0.2, 
                           11: 0.2, 12: 0.5, 13: 0.5, 14: 0.5, 15: 0.5, 16: 0.5, 17: 0.5, 18: 0.5, 19: 0.5}
-            thres = labels.new_ones(labels.shape)
+            thres = labels.new_ones(labels.shape).float()
 
             for lbl in range(1, 20):
                 thres[labels == lbl] = thres_dict[lbl]
 
             mask = (labels != 0) & (scores > thres)
+            # mask = (scores > thres)
 
-            scores[mask] *= 1.6
+            scores[mask] *= 2
             det_bboxes, keep = batched_nms(bboxes, scores, labels,  
                                                 nms_cfg=dict(iou_threshold=0.5), class_agnostic=True)
             results = InstanceData()
             results.bboxes = det_bboxes[:, :-1]
             results.scores = det_bboxes[:, -1]
             results.labels = labels[keep]
-            results.scores[mask[keep]] /= 1.6
+            results.scores[mask[keep]] /= 2
+
+            # results_id.scores[mask] = scores[mask] * 1.5
+            # result_list.append(results_id)
 
             result_list.append(results)
+            
         return result_list
     
     def _predict_by_feat_single_bbyy(self,
@@ -6034,7 +6068,7 @@ class GroundingDINOPTDetSegSAM(GroundingDINOPTSeg):
             scores = data_sample.pred_instances.scores
             data_sample.pred_instances.scores[(scores > 0.1) & (areas < 1024)] = bbox_anomaly_score[(scores > 0.1) & (areas < 1024)]
             # data_sample.pred_instances = data_sample.pred_instances[areas < 1024]
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
         
         
         # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
@@ -6196,24 +6230,25 @@ class GroundingDINOPTSegSAM(GroundingDINOPT):
                 # for visualization
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
-            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.25) & (data_sample.pred_instances.labels == 0)]
+            # data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.scores > 0.35) & (data_sample.pred_instances.labels == 0)]
+            data_sample.pred_instances = data_sample.pred_instances[(data_sample.pred_instances.labels == 0)]
         
         
-        for input_img, data_sample in zip(batch_inputs, batch_data_samples):
-            masks = torch.zeros_like(input_img[:1])
-            ori_shape = data_sample.metainfo['ori_shape']
-            if len(data_sample.pred_instances) > 0:
-                masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
-                masks = masks[0][:, 0].bool().float()
-            masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
-            data_sample.set_data({
-                'pred_sem_seg':
-                PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
-                # 'seg_logits':
-                # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
-                'pred_masks':
-                PixelData(**{'sem_seg': masks.squeeze(1)}),
-            })
+        # for input_img, data_sample in zip(batch_inputs, batch_data_samples):
+        #     masks = torch.zeros_like(input_img[:1])
+        #     ori_shape = data_sample.metainfo['ori_shape']
+        #     if len(data_sample.pred_instances) > 0:
+        #         masks = self.sam_predict_hf(data_sample.metainfo['img_path'], data_sample.pred_instances.bboxes)
+        #         masks = masks[0][:, 0].bool().float()
+        #     masks = F.interpolate(masks.unsqueeze(1), size=(ori_shape[0], ori_shape[1]), mode='bilinear').to(torch.int32)
+        #     data_sample.set_data({
+        #         'pred_sem_seg':
+        #         PixelData(**{'sem_seg': masks.sum(dim=0).bool().float()}),
+        #         # 'seg_logits':
+        #         # PixelData(**{'data': seg_logits_ori_shape.squeeze(0)}),
+        #         'pred_masks':
+        #         PixelData(**{'sem_seg': masks.squeeze(1)}),
+        #     })
 
         return batch_data_samples
 

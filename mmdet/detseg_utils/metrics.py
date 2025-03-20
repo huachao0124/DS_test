@@ -569,15 +569,18 @@ class AnomalyIoUMetric(BaseMetric):
 
         anomaly_list = []
 
-        for masks, single_pred_instances in zip(pred_anomaly_maps, pred_instances):
-            anomaly = torch.zeros_like(masks[0]).float()
-            for mask, score in zip(masks, single_pred_instances['scores']):
-                anomaly[mask > 0] = score #       score
-            anomaly_list.append(anomaly)
+        # for masks, single_pred_instances in zip(pred_anomaly_maps, pred_instances):
+        #     anomaly = torch.zeros_like(masks[0]).float()
+        #     for mask, score in zip(masks, single_pred_instances['scores']):
+        #         anomaly[mask > 0] = score #       score
+        #     anomaly_list.append(anomaly)
         
-        anomaly = torch.stack(anomaly_list)
+        # anomaly = torch.stack(anomaly_list)
 
-        for threshold in np.arange(-1, 1+step, step):
+        anomaly = torch.stack(pred_anomaly_maps)
+        left, right = anomaly.min(), anomaly.max()
+
+        for threshold in np.arange(left - step, right + step, step):
             num_set += 1
             threshold_list.append(threshold)
             anomaly_mask = torch.zeros_like(anomaly)

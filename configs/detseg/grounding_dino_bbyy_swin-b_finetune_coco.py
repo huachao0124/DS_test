@@ -221,6 +221,7 @@ val_dataloader = dict(dataset=dict(_delete_=True,
 test_dataloader = val_dataloader
 
 val_evaluator = dict(type='AnomalyIoUMetric')
+test_evaluator = val_evaluator
 
 optim_wrapper = dict(
     _delete_=True,

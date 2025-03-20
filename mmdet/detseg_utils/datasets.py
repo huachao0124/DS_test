@@ -749,7 +749,7 @@ class SMIYCDataset(BaseDataset):
                  data_root: str = None, 
                  data_info: str = None, 
                  img_suffix: str = '.jpg', 
-                 split: str = 'validation',
+                 split: str = 'test',
                  **kwargs) -> None:
         super().__init__(lazy_init=True, serialize_data=False, data_root=data_root, **kwargs)
         self.img_list = glob.glob(os.path.join(data_root, 'images', f'*{img_suffix}'))
@@ -789,7 +789,8 @@ class GetAnomalyScoreMap(BaseTransform):
         self.data_path = data_path
     
     def transform(self, results: dict) -> dict:
-        anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])).replace('webp', 'jpg').replace('image_', '') + '.npy')
+        # anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])).replace('webp', 'jpg').replace('image_', '') + '.npy')
+        anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])) + '.npy')
         # anomaly_score_map = np.load(os.path.join(self.data_path, os.path.basename(results['img_path'])).replace('webp', 'jpg').replace('image_', '').replace('.png', '.npy').replace('_leftImg8bit', ''))
         results['anomaly_score_map'] = anomaly_score_map
         return results

@@ -133,13 +133,20 @@ class DetLocalVisualizer(Visualizer):
 
             bbox_color = palette if self.bbox_color is None \
                 else self.bbox_color
+            
+            # bbox_color = [(255, 50, 50), (128, 64, 128), (244, 35, 232), (70, 70, 70), (102, 102, 156),
+            # (190, 153, 153), (153, 153, 153), (250, 170, 30), (220, 220, 0),
+            # (107, 142, 35), (152, 251, 152), (70, 130, 180),
+            # (220, 20, 60), (255, 0, 0), (0, 0, 142), (0, 0, 70),
+            # (0, 60, 100), (0, 80, 100), (0, 0, 230), (119, 11, 32)]
+
             bbox_palette = get_palette(bbox_color, max_label + 1)
             colors = [bbox_palette[label] for label in labels]
             self.draw_bboxes(
                 bboxes,
                 edge_colors=colors,
                 alpha=self.alpha,
-                line_widths=self.line_width)
+                line_widths=100)
 
             positions = bboxes[:, :2] + self.line_width
             areas = (bboxes[:, 3] - bboxes[:, 1]) * (

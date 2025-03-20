@@ -318,7 +318,8 @@ test_pipeline = [
     # dict(type='UnifyGT', label_map={0: 0, 2: 1}),
     dict(type='ConcatPrompt'),
     # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RPL/score_results/lost_and_found'),
-    # dict(type='GetAnomalyScoreMap', data_path='/home/arima/RbA/score_results/road_anomaly'),
+    # dict(type='GetAnomalyScoreMap', data_path='./other_score_results/score_results_m2a/RoadAnomaly'),
+    dict(type='GetAnomalyScoreMap', data_path='./other_score_results/score_results_m2a/FS_LostFound'),
     dict(type='PackDetInputs', 
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'anomaly_score_map',
                    'scale_factor', 'flip', 'flip_direction', 'text',
@@ -334,7 +335,8 @@ test_dataset_type = 'FSLostAndFoundDataset'
 test_data_root = 'data/FS_LostFound'
 # test_data_root = 'data/FS_Static'
 # test_dataset_type = 'SMIYCDataset'
-# test_data_root = 'data/SMIYC/dataset_AnomalyTrack'
+# test_data_root = 'data/SMIYC/dataset_RoadAnomalyTrack'
+# test_data_root = 'data/SMIYC/dataset_ObstacleTrack'
 # test_dataset_type = 'LostAndFoundDataset'
 # test_data_root = 'data/LostAndFound'
 
@@ -367,7 +369,8 @@ train_dataloader = dict(_delete_=True,
 # val_dataloader = dict(dataset=dict(type=test_dataset_type,
 #                                      data_root=test_data_root,
 #                                      pipeline=test_pipeline))
-val_dataloader = dict(dataset=dict(_delete_=True,
+val_dataloader = dict(batch_size=1,
+                        dataset=dict(_delete_=True,
                                     type=test_dataset_type, 
                                     data_root=test_data_root, 
                                     pipeline=test_pipeline, 
